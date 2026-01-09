@@ -1,0 +1,134 @@
+bundle:
+  name: bind_agents_etl
+
+include:
+  - resources/**/*.yml
+
+variables:
+  catalog:
+    default: bind_agent
+  schema:
+    default: docs
+
+  landing_volume:
+    default: pdf
+  state_volume:
+    default: docs_state
+
+  # Trigger (UI) usa /Volumes
+  input_path_trigger:
+    default: /Volumes/${var.catalog}/${var.schema}/${var.landing_volume}/
+
+  # Auto Loader usa dbfs:/Volumes
+  input_path:
+    default: /Volumes/${var.catalog}/${var.schema}/${var.landing_volume}/
+
+  state_root:
+    default: dbfs:/Volumes/${var.catalog}/${var.schema}/${var.state_volume}/
+
+  schema_location:
+    default: ${var.state_root}autoloader/pdf_bronze/schema/
+  checkpoint_path:
+    default: ${var.state_root}autoloader/pdf_bronze/checkpoints/
+
+  # Variables Bronze
+  bronze_table:
+    default: ${var.catalog}.${var.schema}.pdf_bronze
+
+  # Variables silver
+  silver_table:
+    default: ${var.catalog}.${var.schema}.pdf_ocr_silver
+  # Opcional: dónde guardar imágenes por página si querés image_uri
+  image_output_path:
+    default: /Volumes/${var.catalog}/${var.schema}/docs_state/ai_parse_images/pdf_bronze/
+
+  # Variables Gold
+  gold_table:
+    default: ${var.catalog}.${var.schema}.pdf_chunks_gold
+  chunk_size_chars:
+    default: 2500
+  chunk_overlap_chars:
+    default: 250
+  min_chunk_chars:
+    default: 200
+  topic_mode:
+    default: heuristic
+
+  # Variables de Embeddings
+  embeddings_table:
+    description: "Tabla destino con embeddings"
+    default: "bind_agent.docs.pdf_chunks_embeddings"
+
+  embedding_endpoint:
+    description: "Serving endpoint de embeddings"
+    default: "databricks-bge-large-en"
+
+  # Vector Search
+  vs_endpoint:
+    description: "Vector Search endpoint name"
+    default: "bind_agent_vs"
+
+  vs_index_full_name:
+    description: "UC full name for the Vector Search index (catalog.schema.index)"
+    default: "${var.catalog}.${var.schema}.pdf_chunks_vs_idx"
+
+  vs_primary_key:
+    description: "Primary key column in the embeddings table"
+    default: "chunk_id"
+
+  vs_embedding_column:
+    description: "Embedding vector column in the embeddings table"
+    default: "embedding"
+
+  vs_pipeline_type:
+    description: "TRIGGERED or CONTINUOUS"
+    default: "TRIGGERED"
+
+  vs_poll_seconds:
+    default: 15
+
+  vs_endpoint_timeout_seconds:
+    default: 1200
+
+  vs_index_timeout_seconds:
+    default: 1800
+
+resources:
+  schemas:
+    docs_schema:
+      catalog_name: ${var.catalog}
+      name: ${var.schema}
+      comment: "Schema para ingesta y procesamiento de documentos"
+
+  volumes:
+    pdf_volume:
+      catalog_name: ${var.catalog}
+      schema_name: ${var.schema}
+      name: ${var.landing_volume}
+      comment: "Landing: PDFs que disparan la ingesta"
+
+    docs_state_volume:
+      catalog_name: ${var.catalog}
+      schema_name: ${var.schema}
+      name: ${var.state_volume}
+      comment: "Estado: checkpoints y schemaLocation (Auto Loader)"
+
+targets:
+  dev:
+    default: true
+    workspace:
+      host: https://dbc-56f60291-144c.cloud.databricks.com
+    variables:
+      catalog: bind_agent
+      schema: docs
+      landing_volume: pdf
+      state_volume: docs_state
+
+  prod:
+    workspace:
+      host: https://dbc-56f60291-144c.cloud.databricks.com
+    variables:
+      catalog: bind_agent
+      schema: docs
+      landing_volume: pdf
+      state_volume: docs_state
