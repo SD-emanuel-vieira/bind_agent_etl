@@ -53,6 +53,7 @@ resources:
             - task_key: bronze_pdf_ingest
           timeout_seconds: 3600
           spark_python_task:
+            # python_file: ../../src/silver_pdf_ocr.py
             python_file: ../../src/silver_pdf_ocr.py
             parameters:
               - --bronze_table
@@ -61,6 +62,7 @@ resources:
               - ${var.silver_table}
               - --image_output_path
               - ${var.image_output_path}
+              - --do_enrich_graphs
           environment_key: etl_serverless
 
         # -----------------------

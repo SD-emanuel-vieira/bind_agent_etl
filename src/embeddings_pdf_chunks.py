@@ -41,6 +41,7 @@ def ensure_embeddings_table(emb_table: str) -> None:
         spark.sql(f"""
         CREATE TABLE IF NOT EXISTS {emb_table} (
           chunk_id          STRING,
+          chunk_type        STRING,
           doc_id            STRING,
           path              STRING,
           modificationTime  TIMESTAMP,
@@ -70,6 +71,7 @@ def ensure_cdf_enabled(emb_table: str) -> None:
 
     existing_cols = set([c.name for c in spark.table(emb_table).schema.fields])
     desired = [
+        ("chunk_type", "STRING"),
         ("file_date", "DATE"),
         ("file_type", "STRING"),
         ("chunk_hash", "STRING"),
@@ -207,6 +209,7 @@ def upsert_embeddings(emb_table: str, updates: DataFrame) -> None:
     USING emb_updates s
     ON t.chunk_id = s.chunk_id
     WHEN MATCHED THEN UPDATE SET
+      t.chunk_type      = s.chunk_type,
       t.doc_id           = s.doc_id,
       t.path             = s.path,
       t.modificationTime = s.modificationTime,
@@ -224,14 +227,14 @@ def upsert_embeddings(emb_table: str, updates: DataFrame) -> None:
       t.embedding_dim    = s.embedding_dim,
       t.embed_ts         = s.embed_ts
     WHEN NOT MATCHED THEN INSERT (
-      chunk_id, doc_id, path, modificationTime,
+      chunk_id, chunk_type, doc_id, path, modificationTime,
       file_date, file_type,
       page_id, page_num, topic,
       chunk_text, chunk_char_len, embed_text, chunk_hash,
       embedding, embedding_model, embedding_dim, embed_ts
     )
     VALUES (
-      s.chunk_id, s.doc_id, s.path, s.modificationTime,
+      s.chunk_id, s.chunk_type, s.doc_id, s.path, s.modificationTime,
       s.file_date, s.file_type,
       s.page_id, s.page_num, s.topic,
       s.chunk_text, s.chunk_char_len, s.embed_text, s.chunk_hash,
@@ -253,13 +256,19 @@ def main() -> None:
 
     gold = spark.table(args.gold_table)
 
+    # Soportar versiones antiguas de Gold (sin chunk_type)
+    if "chunk_type" not in gold.columns:
+        gold = gold.withColumn("chunk_type", F.lit("text"))
+    else:
+        gold = gold.withColumn("chunk_type", F.coalesce(F.col("chunk_type"), F.lit("text")))
+
     if "file_date" not in gold.columns:
         gold = gold.withColumn("file_date", F.lit(None).cast("date"))
     if "file_type" not in gold.columns:
         gold = gold.withColumn("file_type", F.lit(None).cast("string"))
 
     base = gold.select(
-        "chunk_id", "doc_id", "path", "modificationTime",
+        "chunk_id", "chunk_type", "doc_id", "path", "modificationTime",
         "file_date", "file_type",
         "page_id", "page_num", "topic",
         "chunk_text"

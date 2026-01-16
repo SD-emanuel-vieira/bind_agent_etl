@@ -47,6 +47,12 @@ def ensure_gold_table(gold_table: str):
           page_label STRING,
           topic STRING,
 
+          -- tipo de chunk: texto normal o interpretación de figura
+          chunk_type STRING,
+
+          -- enriquecimiento desde Silver (gráficos interpretados)
+          page_figures_enriched_text STRING,
+
           page_hash STRING,
 
           chunk_id STRING,
@@ -60,14 +66,18 @@ def ensure_gold_table(gold_table: str):
         """)
         return
 
-    # Si ya existe, agregar columnas faltantes
-    to_add = []
-    if "file_date" not in existing_cols:
-        to_add.append("file_date DATE")
-    if "file_type" not in existing_cols:
-        to_add.append("file_type STRING")
-    if to_add:
-        spark.sql(f"ALTER TABLE {gold_table} ADD COLUMNS ({', '.join(to_add)})")
+    # # Si ya existe, agregar columnas faltantes
+    # to_add = []
+    # if "file_date" not in existing_cols:
+    #     to_add.append("file_date DATE")
+    # if "file_type" not in existing_cols:
+    #     to_add.append("file_type STRING")
+    # if "page_figures_enriched_text" not in existing_cols:
+    #     to_add.append("page_figures_enriched_text STRING")
+    # if "chunk_type" not in existing_cols:
+    #     to_add.append("chunk_type STRING")
+    # if to_add:
+    #     spark.sql(f"ALTER TABLE {gold_table} ADD COLUMNS ({', '.join(to_add)})")
 
 
 def _first_meaningful_line(text: str) -> str:
@@ -75,6 +85,9 @@ def _first_meaningful_line(text: str) -> str:
         return ""
     for line in text.splitlines():
         s = line.strip().lstrip("•-–—").strip()
+        # Evitar que el header de figuras sea el "topic"
+        if s.lower().startswith("figures"):
+            continue
         if len(s) >= 3:
             return s
     return ""
@@ -158,6 +171,11 @@ OUT_SCHEMA = T.StructType([
     T.StructField("page_label", T.StringType(), True),
     T.StructField("topic", T.StringType(), True),
 
+    # tipo de chunk: 'text' o 'figure_enriched'
+    T.StructField("chunk_type", T.StringType(), True),
+
+    T.StructField("page_figures_enriched_text", T.StringType(), True),
+
     T.StructField("page_hash", T.StringType(), True),
 
     T.StructField("chunk_index", T.IntegerType(), True),
@@ -171,8 +189,13 @@ def make_chunks_map_in_pandas(chunk_size: int, overlap: int, min_chars: int, top
         for pdf in it:
             rows: List[Dict] = []
             for r in pdf.itertuples(index=False):
-                text = r.page_text if isinstance(r.page_text, str) else ""
-                if not text or len(text.strip()) < min_chars:
+                chunk_type = getattr(r, "chunk_type", None)
+                text = r.content_text if isinstance(getattr(r, "content_text", None), str) else ""
+
+                # Para chunks de figuras, permitimos textos más cortos
+                min_chars_local = min_chars if chunk_type == "text" else min(50, min_chars)
+
+                if not text or len(text.strip()) < min_chars_local:
                     continue
 
                 topic, page_label = build_topic_and_label(text, r.page_num, topic_mode)
@@ -180,7 +203,7 @@ def make_chunks_map_in_pandas(chunk_size: int, overlap: int, min_chars: int, top
 
                 for idx, ch in enumerate(chunks):
                     ch = ch.strip()
-                    if len(ch) < min_chars:
+                    if len(ch) < min_chars_local:
                         continue
                     rows.append({
                         "doc_id": r.doc_id,
@@ -194,6 +217,12 @@ def make_chunks_map_in_pandas(chunk_size: int, overlap: int, min_chars: int, top
                         "page_num": int(r.page_num) if r.page_num is not None else None,
                         "page_label": page_label,
                         "topic": topic,
+
+                        "chunk_type": chunk_type,
+
+                        "page_figures_enriched_text": r.page_figures_enriched_text
+                        if isinstance(getattr(r, "page_figures_enriched_text", None), str)
+                        else None,
 
                         "page_hash": r.page_hash,
 
@@ -217,7 +246,12 @@ def main():
 
     ensure_gold_table(args.gold_table)
 
-    silver = (
+    # ------------------------------------------------------------
+    # Construimos Gold como CHUNKS separados:
+    # - chunk_type='text'            -> proviene de page_text
+    # - chunk_type='figure_enriched' -> proviene de page_figures_enriched_text
+    # ------------------------------------------------------------
+    silver_base = (
         spark.table(args.silver_table)
         .select(
             "doc_id", "path", "modificationTime",
@@ -226,22 +260,54 @@ def main():
             F.col("page_id").cast("int").alias("page_id"),
             F.col("page_num").cast("int").alias("page_num"),
             F.col("page_text").cast("string").alias("page_text"),
+            F.col("page_figures_enriched_text").cast("string").alias("page_figures_enriched_text"),
         )
-        .withColumn("page_hash", F.sha2(F.coalesce(F.col("page_text"), F.lit("")), 256))
+    )
+
+    pages_text = (
+        silver_base
         .where("page_text IS NOT NULL AND length(trim(page_text)) > 0")
+        .withColumn("chunk_type", F.lit("text"))
+        .withColumn("content_text", F.col("page_text"))
+        .drop("page_text")
+    )
+
+    pages_figures = (
+        silver_base
+        .where("page_figures_enriched_text IS NOT NULL AND length(trim(page_figures_enriched_text)) > 0")
+        .withColumn("chunk_type", F.lit("figure_enriched"))
+        .withColumn("content_text", F.col("page_figures_enriched_text"))
+        .drop("page_text")
+    )
+
+    silver = (
+        pages_text
+        .unionByName(pages_figures, allowMissingColumns=True)
+        .withColumn(
+            "page_hash",
+            F.sha2(
+                F.concat_ws(
+                    "||",
+                    F.lit("v3"),
+                    F.col("chunk_type"),
+                    F.coalesce(F.col("content_text"), F.lit("")),
+                ),
+                256,
+            ),
+        )
     )
 
     # Procesar sólo páginas nuevas o cuyo page_hash cambió
     gold_keys = (
         spark.table(args.gold_table)
-        .select("doc_id", "modificationTime", "page_id", "page_hash")
-        .dropDuplicates(["doc_id", "modificationTime", "page_id", "page_hash"])
+        .select("doc_id", "modificationTime", "page_id", "chunk_type", "page_hash")
+        .dropDuplicates(["doc_id", "modificationTime", "page_id", "chunk_type", "page_hash"])
     )
 
     pages_to_process = (
         silver.join(
             gold_keys,
-            on=["doc_id", "modificationTime", "page_id", "page_hash"],
+            on=["doc_id", "modificationTime", "page_id", "chunk_type", "page_hash"],
             how="left_anti"
         )
     )
@@ -262,7 +328,8 @@ def main():
         .select(
             "doc_id", "path", "modificationTime",
             "file_date", "file_type",
-            "page_id", "page_num", "page_text", "page_hash"
+            "page_id", "page_num", "chunk_type", "content_text",
+            "page_figures_enriched_text", "page_hash"
         )
         .mapInPandas(chunker, schema=OUT_SCHEMA)
         .withColumn(
@@ -273,6 +340,7 @@ def main():
                     F.col("doc_id"),
                     F.coalesce(F.col("modificationTime").cast("string"), F.lit("")),
                     F.coalesce(F.col("page_id").cast("string"), F.lit("")),
+                    F.coalesce(F.col("chunk_type"), F.lit("")),
                     F.coalesce(F.col("chunk_index").cast("string"), F.lit("")),
                     F.coalesce(F.col("page_hash"), F.lit(""))
                 ),
@@ -299,6 +367,10 @@ def main():
       t.page_num = s.page_num,
       t.page_label = s.page_label,
       t.topic = s.topic,
+
+      t.chunk_type = s.chunk_type,
+
+      t.page_figures_enriched_text = s.page_figures_enriched_text,
       t.page_hash = s.page_hash,
       t.chunk_index = s.chunk_index,
       t.chunk_text = s.chunk_text,
@@ -308,6 +380,10 @@ def main():
       doc_id, path, modificationTime,
       file_date, file_type,
       page_id, page_num, page_label, topic,
+
+      chunk_type,
+
+      page_figures_enriched_text,
       page_hash,
       chunk_id, chunk_index, chunk_text, chunk_len,
       gold_ingest_ts
@@ -315,6 +391,10 @@ def main():
       s.doc_id, s.path, s.modificationTime,
       s.file_date, s.file_type,
       s.page_id, s.page_num, s.page_label, s.topic,
+
+      s.chunk_type,
+
+      s.page_figures_enriched_text,
       s.page_hash,
       s.chunk_id, s.chunk_index, s.chunk_text, s.chunk_len,
       s.gold_ingest_ts
@@ -327,18 +407,36 @@ def main():
     WHERE EXISTS (
       SELECT 1
       FROM (
-        SELECT DISTINCT doc_id, modificationTime, page_id
+        SELECT DISTINCT doc_id, modificationTime, page_id, chunk_type
         FROM gold_chunks_updates
       ) k
       WHERE t.doc_id = k.doc_id
         AND t.modificationTime = k.modificationTime
         AND t.page_id = k.page_id
+        AND t.chunk_type = k.chunk_type
     )
     AND NOT EXISTS (
       SELECT 1
       FROM gold_chunks_updates s
       WHERE s.chunk_id = t.chunk_id
     )
+    """)
+
+    # 3) Limpieza de legado: si existían filas antiguas sin chunk_type (versiones previas)
+    # las borramos para las mismas páginas re-procesadas.
+    spark.sql(f"""
+    DELETE FROM {args.gold_table} AS t
+    WHERE t.chunk_type IS NULL
+      AND EXISTS (
+        SELECT 1
+        FROM (
+          SELECT DISTINCT doc_id, modificationTime, page_id
+          FROM gold_chunks_updates
+        ) k
+        WHERE t.doc_id = k.doc_id
+          AND t.modificationTime = k.modificationTime
+          AND t.page_id = k.page_id
+      )
     """)
 
     print("[gold_pdf_chunks] Upsert + cleanup completo.")
