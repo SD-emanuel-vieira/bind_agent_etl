@@ -53,7 +53,6 @@ resources:
             - task_key: bronze_pdf_ingest
           timeout_seconds: 3600
           spark_python_task:
-            # python_file: ../../src/silver_pdf_ocr.py
             python_file: ../../src/silver_pdf_ocr.py
             parameters:
               - --bronze_table
@@ -61,8 +60,50 @@ resources:
               - --silver_table
               - ${var.silver_table}
               - --image_output_path
+              - ${var.image_output_path}   
+          environment_key: etl_serverless
+
+        # -----------------------
+        # TASK 2b: Silver Enrich (topic_llm + graphs)
+        # Lee imágenes ya escritas y hace enrichment
+        # -----------------------
+        - task_key: silver_pdf_enrich
+          depends_on:
+            - task_key: silver_pdf_ocr
+          timeout_seconds: 3600
+          spark_python_task:
+            python_file: ../../src/silver_pdf_enrich.py
+            parameters:
+              - --silver_table
+              - ${var.silver_table}
+              - --image_output_path
               - ${var.image_output_path}
+              # Enrichment de topic
+              - --do_enrich_topic
+              - ${var.do_enrich_topic}
+              - --topic_model
+              - ${var.topic_model}
+              - --topic_min_chars
+              - ${var.topic_min_chars}
+              # Enrichment de gráficos
               - --do_enrich_graphs
+              - ${var.do_enrich_graphs}
+              - --enrich_model
+              - ${var.enrich_model}
+              # Enrichment de topic_content
+              - --do_enrich_topic_content
+              - ${var.do_enrich_topic_content}
+              - --topic_content_model
+              - ${var.topic_content_model}
+              - --topic_content_min_chars
+              - ${var.topic_content_min_chars}
+              # Enrichment de metadata
+              - --do_enrich_metadata
+              - ${var.do_enrich_metadata}
+              - --metadata_model
+              - ${var.metadata_model}
+              - --metadata_min_chars
+              - ${var.metadata_min_chars}
           environment_key: etl_serverless
 
         # -----------------------
@@ -70,7 +111,7 @@ resources:
         # -----------------------
         - task_key: gold_pdf_chunks
           depends_on:
-            - task_key: silver_pdf_ocr
+            - task_key: silver_pdf_enrich
           timeout_seconds: 3600
           spark_python_task:
             python_file: ../../src/gold_pdf_chunks.py
@@ -85,8 +126,6 @@ resources:
               - ${var.chunk_overlap_chars}
               - --min_chunk_chars
               - ${var.min_chunk_chars}
-              - --topic_mode
-              - ${var.topic_mode}
           environment_key: etl_serverless
         # -----------------------
         # TASK 4: Embeddings chuncks

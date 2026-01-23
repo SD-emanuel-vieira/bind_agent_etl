@@ -31,18 +31,53 @@ variables:
   checkpoint_path:
     default: ${var.state_root}autoloader/pdf_bronze/checkpoints/
 
-  # Variables Bronze
+  ##======= Variables Bronze
   bronze_table:
     default: ${var.catalog}.${var.schema}.pdf_bronze
 
-  # Variables silver
+  ##======= Variables silver
   silver_table:
     default: ${var.catalog}.${var.schema}.pdf_ocr_silver
   # Opcional: dónde guardar imágenes por página si querés image_uri
   image_output_path:
     default: /Volumes/${var.catalog}/${var.schema}/docs_state/ai_parse_images/pdf_bronze/
 
-  # Variables Gold
+  # variables to configure enrrich text
+  do_enrich_graphs:
+    description: "Flag que marca se se analiza con LLM los graficos"
+    default: "true"
+  enrich_model:
+    description: "Endpoint LLM para topic por página"
+    default: "databricks-gemma-3-12b"
+
+  # variables to configure topic heuristic
+  do_enrich_topic:
+    description: "Flag que marca se se analiza con LLM los topicos"
+    default: "true"
+  topic_model:
+    description: "Endpoint LLM para topic por página"
+    default: "databricks-gemma-3-12b"
+  topic_min_chars:
+    description: "Minimo de caracteres de page_text usados para generar el topic"
+    default: 50
+
+  # parametros para topic_content
+  do_enrich_topic_content:
+    default: "true"
+  topic_content_model:
+    default: "databricks-gemma-3-12b"
+  topic_content_min_chars:
+    default: "50"
+
+  # parametros de metadata enrich
+  do_enrich_metadata:
+    default: "true"
+  metadata_model:
+    default: "databricks-gemma-3-12b"
+  metadata_min_chars:
+    default: "100"
+    
+  ##======= Variables Gold
   gold_table:
     default: ${var.catalog}.${var.schema}.pdf_chunks_gold
   chunk_size_chars:
@@ -51,10 +86,8 @@ variables:
     default: 250
   min_chunk_chars:
     default: 200
-  topic_mode:
-    default: heuristic
 
-  # Variables de Embeddings
+  ##======= Variables de Embeddings
   embeddings_table:
     description: "Tabla destino con embeddings"
     default: "bind_agent.docs.pdf_chunks_embeddings"

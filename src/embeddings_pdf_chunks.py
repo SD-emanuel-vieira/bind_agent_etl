@@ -1,5 +1,4 @@
 # src/embeddings_pdf_chunks.py
-# (mismo contenido que el archivo descargable)
 # ------------------------------------------------------------
 # Genera / actualiza la tabla de embeddings de manera incremental
 # a partir de la tabla Gold de chunks.
@@ -49,7 +48,15 @@ def ensure_embeddings_table(emb_table: str) -> None:
           file_type         STRING,
           page_id           INT,
           page_num          INT,
-          topic             STRING,
+          
+          -- Topic fields (desde Silver/Gold)
+          topic_heuristic   STRING,
+          topic_llm         STRING,
+          topic_content     STRING,
+          
+          -- Metadata estructurada (JSON)
+          metadata_enrich   STRING,
+          
           chunk_text        STRING,
           chunk_char_len    INT,
           embed_text        STRING,
@@ -62,6 +69,7 @@ def ensure_embeddings_table(emb_table: str) -> None:
         USING DELTA
         """)
         return
+
 
 def ensure_cdf_enabled(emb_table: str) -> None:
     spark.sql(f"""
@@ -78,6 +86,10 @@ def ensure_cdf_enabled(emb_table: str) -> None:
         ("embedding_model", "STRING"),
         ("embedding_dim", "INT"),
         ("embed_ts", "TIMESTAMP"),
+        ("topic_heuristic", "STRING"),
+        ("topic_llm", "STRING"),
+        ("topic_content", "STRING"),
+        ("metadata_enrich", "STRING"),
     ]
     for col_name, col_type in desired:
         if col_name not in existing_cols:
@@ -209,7 +221,7 @@ def upsert_embeddings(emb_table: str, updates: DataFrame) -> None:
     USING emb_updates s
     ON t.chunk_id = s.chunk_id
     WHEN MATCHED THEN UPDATE SET
-      t.chunk_type      = s.chunk_type,
+      t.chunk_type       = s.chunk_type,
       t.doc_id           = s.doc_id,
       t.path             = s.path,
       t.modificationTime = s.modificationTime,
@@ -217,7 +229,10 @@ def upsert_embeddings(emb_table: str, updates: DataFrame) -> None:
       t.file_type        = s.file_type,
       t.page_id          = s.page_id,
       t.page_num         = s.page_num,
-      t.topic            = s.topic,
+      t.topic_heuristic  = s.topic_heuristic,
+      t.topic_llm        = s.topic_llm,
+      t.topic_content    = s.topic_content,
+      t.metadata_enrich  = s.metadata_enrich,
       t.chunk_text       = s.chunk_text,
       t.chunk_char_len   = s.chunk_char_len,
       t.embed_text       = s.embed_text,
@@ -229,14 +244,16 @@ def upsert_embeddings(emb_table: str, updates: DataFrame) -> None:
     WHEN NOT MATCHED THEN INSERT (
       chunk_id, chunk_type, doc_id, path, modificationTime,
       file_date, file_type,
-      page_id, page_num, topic,
+      page_id, page_num, 
+      topic_heuristic, topic_llm, topic_content, metadata_enrich,
       chunk_text, chunk_char_len, embed_text, chunk_hash,
       embedding, embedding_model, embedding_dim, embed_ts
     )
     VALUES (
       s.chunk_id, s.chunk_type, s.doc_id, s.path, s.modificationTime,
       s.file_date, s.file_type,
-      s.page_id, s.page_num, s.topic,
+      s.page_id, s.page_num,
+      s.topic_heuristic, s.topic_llm, s.topic_content, s.metadata_enrich,
       s.chunk_text, s.chunk_char_len, s.embed_text, s.chunk_hash,
       s.embedding, s.embedding_model, s.embedding_dim, s.embed_ts
     )
@@ -249,7 +266,7 @@ def main() -> None:
     print("[embeddings] gold_table        =", args.gold_table)
     print("[embeddings] embeddings_table  =", args.embeddings_table)
     print("[embeddings] embedding_endpoint=", args.embedding_endpoint)
-    print("[embeddings] mode             =", args.mode)
+    print("[embeddings] mode              =", args.mode)
 
     ensure_embeddings_table(args.embeddings_table)
     ensure_cdf_enabled(args.embeddings_table)
@@ -262,15 +279,25 @@ def main() -> None:
     else:
         gold = gold.withColumn("chunk_type", F.coalesce(F.col("chunk_type"), F.lit("text")))
 
+    # Campos opcionales con defaults
     if "file_date" not in gold.columns:
         gold = gold.withColumn("file_date", F.lit(None).cast("date"))
     if "file_type" not in gold.columns:
         gold = gold.withColumn("file_type", F.lit(None).cast("string"))
+    if "topic_heuristic" not in gold.columns:
+        gold = gold.withColumn("topic_heuristic", F.lit(None).cast("string"))
+    if "topic_llm" not in gold.columns:
+        gold = gold.withColumn("topic_llm", F.lit(None).cast("string"))
+    if "topic_content" not in gold.columns:
+        gold = gold.withColumn("topic_content", F.lit(None).cast("string"))
+    if "metadata_enrich" not in gold.columns:
+        gold = gold.withColumn("metadata_enrich", F.lit(None).cast("string"))
 
     base = gold.select(
         "chunk_id", "chunk_type", "doc_id", "path", "modificationTime",
         "file_date", "file_type",
-        "page_id", "page_num", "topic",
+        "page_id", "page_num", 
+        "topic_heuristic", "topic_llm", "topic_content", "metadata_enrich",
         "chunk_text"
     )
 
