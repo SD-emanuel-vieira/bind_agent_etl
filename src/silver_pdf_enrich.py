@@ -208,14 +208,16 @@ def enrich_topic_content(silver_table: str, topic_content_model: str, min_chars:
         has_topic_content = F.col("topic_content").isNotNull()
     
     # Verificar si page_table_text existe
-    if "page_table_text" not in silver_df.columns:
-        combined_content = F.coalesce(F.col("page_text"), F.lit(""))
-    else:
-        combined_content = F.concat_ws(
-            "\n\n---\n\n",
-            F.coalesce(F.col("page_text"), F.lit("")),
-            F.coalesce(F.col("page_table_text"), F.lit(""))
-        )
+    # Construir contenido combinado con todos los campos disponibles
+    parts = [F.coalesce(F.col("page_text"), F.lit(""))]
+
+    if "page_table_text" in silver_df.columns:
+        parts.append(F.coalesce(F.col("page_table_text"), F.lit("")))
+
+    if "page_figures_enriched_text" in silver_df.columns:
+        parts.append(F.coalesce(F.col("page_figures_enriched_text"), F.lit("")))
+
+    combined_content = F.concat_ws("\n\n---\n\n", *parts)
     
     content_length = F.length(F.trim(combined_content))
     
@@ -323,14 +325,16 @@ def enrich_metadata(silver_table: str, metadata_model: str, min_chars: int):
         has_metadata = F.col("metadata_enrich").isNotNull()
     
     # Verificar si page_table_text existe
-    if "page_table_text" not in silver_df.columns:
-        combined_content = F.coalesce(F.col("page_text"), F.lit(""))
-    else:
-        combined_content = F.concat_ws(
-            "\n\n---TABLA---\n\n",
-            F.coalesce(F.col("page_text"), F.lit("")),
-            F.coalesce(F.col("page_table_text"), F.lit(""))
-        )
+    # Construir contenido combinado con todos los campos disponibles
+    parts = [F.coalesce(F.col("page_text"), F.lit(""))]
+
+    if "page_table_text" in silver_df.columns:
+        parts.append(F.coalesce(F.col("page_table_text"), F.lit("")))
+
+    if "page_figures_enriched_text" in silver_df.columns:
+        parts.append(F.coalesce(F.col("page_figures_enriched_text"), F.lit("")))
+
+    combined_content = F.concat_ws("\n\n---\n\n", *parts)
     
     content_length = F.length(F.trim(combined_content))
     
