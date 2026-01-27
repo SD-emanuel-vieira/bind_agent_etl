@@ -80,16 +80,26 @@ def enrich_topic_llm(silver_table: str, image_output_path: str, topic_model: str
     """
     print(f"[enrich_topic_llm] Buscando páginas con >= {min_chars} chars sin topic_llm...")
     
+    text_ok = (
+        F.col("page_text").isNotNull()
+        & (F.length(F.trim(F.col("page_text"))) >= min_chars)
+    )
+
+    no_text_but_other_ok = (
+        F.col("page_text").isNull()
+        & (
+            F.col("page_table_text").isNotNull()
+            | F.col("page_figures_text").isNotNull()
+        )
+    )
+    
     # Leer páginas candidatas desde Silver (que aún no tienen topic_llm)
     # Solo páginas CON texto suficiente (>= min_chars)
     candidates = (
         spark.table(silver_table)
         .filter(F.col("topic_llm").isNull())
         .filter(F.col("page_image_uri").isNotNull())
-        .filter(
-            F.col("page_text").isNotNull() & 
-            (F.length(F.col("page_text")) >= min_chars)
-        )
+        .filter(text_ok | no_text_but_other_ok)
         .select("doc_id", "modificationTime", "page_id", "page_image_uri")
         .withColumn("image_path_normalized", normalize_path_col(F.col("page_image_uri")))
     )
@@ -129,10 +139,12 @@ def enrich_topic_llm(silver_table: str, image_output_path: str, topic_model: str
         "Tu tarea es identificar el TÓPICO o TEMA principal de esta página.\n\n"
         "REGLAS ESTRICTAS:\n"
         "1. Responde ÚNICAMENTE con el tópico, SIN explicaciones adicionales.\n"
-        "2. Máximo 8 palabras.\n"
+        "2. Máximo 10 palabras.\n"
         "3. Sé específico pero conciso (ej: 'Gráfico de ventas Q3 2024', 'Organigrama departamento TI').\n"
         "4. Si la página está en blanco, responde: 'Página sin contenido'.\n"
-        "5. Responde en español.\n\n"
+        "5. Si cualquiera de las palabras 'Empresas', 'Corporate', 'Institucional', 'Minorista' o 'Baas' aparece,"
+        "debe estar en el tópico también (ej: P&L Empresas). Si aparece más de una de estas palabras debe decir en el tópico 'General'.\n"
+        "6. Responde en español.\n\n"
         "TÓPICO:"
     )
     
@@ -213,6 +225,9 @@ def enrich_topic_content(silver_table: str, topic_content_model: str, min_chars:
 
     if "page_table_text" in silver_df.columns:
         parts.append(F.coalesce(F.col("page_table_text"), F.lit("")))
+        
+    if "page_figures_text" in silver_df.columns:
+        parts.append(F.coalesce(F.col("page_figures_text"), F.lit("")))
 
     if "page_figures_enriched_text" in silver_df.columns:
         parts.append(F.coalesce(F.col("page_figures_enriched_text"), F.lit("")))
@@ -248,7 +263,9 @@ def enrich_topic_content(silver_table: str, topic_content_model: str, min_chars:
             "2. Máximo 8 palabras.\n"
             "3. Sé específico pero conciso (ej: 'Resultados financieros Q3 2024', 'Estructura organizacional', 'Tabla de indicadores operativos').\n"
             "4. Si hay tablas, menciona el tipo de datos que contienen.\n"
-            "5. Responde en español.\n\n"
+            "5. Si cualquiera de las palabras 'Empresas', 'Corporate', 'Institucional', 'Minorista' o 'BaaS' aparece,"
+            "debe estar en el tópico también (ej: P&L Empresas). Si aparece más de una de estas palabras debe decir en el tópico 'General'.\n"
+            "6. Responde en español.\n\n"
             "CONTENIDO DE LA PÁGINA:\n"
         ),
         F.substring(F.col("combined_content"), 1, 4000),  # Truncar a 4000 chars

@@ -96,7 +96,7 @@ variables:
     description: "Serving endpoint de embeddings"
     default: "databricks-bge-large-en"
 
-  # Vector Search
+  ##======= Vector Search
   vs_endpoint:
     description: "Vector Search endpoint name"
     default: "bind_agent_vs"
