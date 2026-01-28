@@ -49,11 +49,15 @@ def ensure_gold_table(gold_table: str):
           page_id INT,
           page_num INT,
           page_label STRING,
+          page_text STRING,
 
           -- Topic fields
           topic_heuristic STRING,
           topic_llm STRING,
           topic_content STRING,
+          
+          -- Segmento de negocio
+          page_segment STRING,
 
           -- Tipo: 'text', 'table', 'figure_enriched'
           chunk_type STRING,
@@ -75,12 +79,16 @@ def ensure_gold_table(gold_table: str):
 
     # Agregar columnas faltantes si existen
     to_add = []
+    if "page_text" not in existing_cols:
+        to_add.append("page_text STRING")
     if "topic_heuristic" not in existing_cols:
         to_add.append("topic_heuristic STRING")
     if "topic_llm" not in existing_cols:
         to_add.append("topic_llm STRING")
     if "topic_content" not in existing_cols:
         to_add.append("topic_content STRING")
+    if "page_segment" not in existing_cols:
+        to_add.append("page_segment STRING")
     if to_add:
         spark.sql(f"ALTER TABLE {gold_table} ADD COLUMNS ({', '.join(to_add)})")
 
@@ -153,9 +161,12 @@ OUT_SCHEMA = T.StructType([
     T.StructField("page_num", T.IntegerType(), True),
     T.StructField("page_label", T.StringType(), True),
 
+    T.StructField("page_text", T.StringType(), True),
+
     T.StructField("topic_heuristic", T.StringType(), True),
     T.StructField("topic_llm", T.StringType(), True),
     T.StructField("topic_content", T.StringType(), True),
+    T.StructField("page_segment", T.StringType(), True),
 
     T.StructField("chunk_type", T.StringType(), True),
 
@@ -206,12 +217,16 @@ def make_chunks_map_in_pandas(chunk_size: int, overlap: int, min_chars: int):
                             "page_id": int(r.page_id) if r.page_id is not None else None,
                             "page_num": int(r.page_num) if r.page_num is not None else None,
                             "page_label": page_label,
+                            "page_text": r.page_text
+                                if isinstance(getattr(r, "page_text", None), str) else None,
                             "topic_heuristic": r.topic_heuristic
                                 if isinstance(getattr(r, "topic_heuristic", None), str) else None,
                             "topic_llm": r.topic_llm
                                 if isinstance(getattr(r, "topic_llm", None), str) else None,
                             "topic_content": r.topic_content
                                 if isinstance(getattr(r, "topic_content", None), str) else None,
+                            "page_segment": r.page_segment
+                                if isinstance(getattr(r, "page_segment", None), str) else None,
                             "chunk_type": "table",
                             "page_figures_enriched_text": None,
                             "page_hash": r.page_hash,
@@ -244,12 +259,16 @@ def make_chunks_map_in_pandas(chunk_size: int, overlap: int, min_chars: int):
                         "page_id": int(r.page_id) if r.page_id is not None else None,
                         "page_num": int(r.page_num) if r.page_num is not None else None,
                         "page_label": page_label,
+                        "page_text": r.page_text
+                            if isinstance(getattr(r, "page_text", None), str) else None,
                         "topic_heuristic": r.topic_heuristic
                             if isinstance(getattr(r, "topic_heuristic", None), str) else None,
                         "topic_llm": r.topic_llm
                             if isinstance(getattr(r, "topic_llm", None), str) else None,
                         "topic_content": r.topic_content
                             if isinstance(getattr(r, "topic_content", None), str) else None,
+                        "page_segment": r.page_segment
+                            if isinstance(getattr(r, "page_segment", None), str) else None,
                         "chunk_type": chunk_type,
                         "page_figures_enriched_text": r.page_figures_enriched_text
                             if isinstance(getattr(r, "page_figures_enriched_text", None), str) else None,
@@ -289,17 +308,24 @@ def main():
         F.col("file_type").cast("string").alias("file_type"),
         F.col("page_id").cast("int").alias("page_id"),
         F.col("page_num").cast("int").alias("page_num"),
-        F.col("page_text").cast("string").alias("page_text"),
     ]
-    
+
     # Columnas opcionales
+    if "page_text" in available_cols:
+        select_cols.append(F.col("page_text").cast("string").alias("page_text"))
+    else:
+        select_cols.append(F.lit(None).cast("string").alias("page_text"))
+
     if "page_table_text" in available_cols:
         select_cols.append(F.col("page_table_text").cast("string").alias("page_table_text"))
     else:
         select_cols.append(F.lit(None).cast("string").alias("page_table_text"))
     
-    select_cols.append(F.col("page_figures_enriched_text").cast("string").alias("page_figures_enriched_text"))
-    
+    if "page_figures_enriched_text" in available_cols:
+        select_cols.append(F.col("page_figures_enriched_text").cast("string").alias("page_figures_enriched_text"))
+    else:
+        select_cols.append(F.lit(None).cast("string").alias("page_figures_enriched_text"))
+
     if "topic_heuristic" in available_cols:
         select_cols.append(F.col("topic_heuristic").cast("string").alias("topic_heuristic"))
     else:
@@ -315,6 +341,11 @@ def main():
     else:
         select_cols.append(F.lit(None).cast("string").alias("topic_content"))
     
+    if "page_segment" in available_cols:
+        select_cols.append(F.col("page_segment").cast("string").alias("page_segment"))
+    else:
+        select_cols.append(F.lit(None).cast("string").alias("page_segment"))
+    
     silver_base = silver_df.select(*select_cols)
 
     # Texto narrativo (sin tablas)
@@ -323,7 +354,7 @@ def main():
         .where("page_text IS NOT NULL AND length(trim(page_text)) > 0")
         .withColumn("chunk_type", F.lit("text"))
         .withColumn("content_text", F.col("page_text"))
-        .drop("page_text", "page_table_text")
+        .drop("page_table_text")
     )
 
     # Tablas (sin fragmentar)
@@ -332,7 +363,7 @@ def main():
         .where("page_table_text IS NOT NULL AND length(trim(page_table_text)) > 0")
         .withColumn("chunk_type", F.lit("table"))
         .withColumn("content_text", F.col("page_table_text"))
-        .drop("page_text", "page_table_text")
+        .drop("page_table_text")
     )
 
     # Figuras enriquecidas
@@ -341,7 +372,7 @@ def main():
         .where("page_figures_enriched_text IS NOT NULL AND length(trim(page_figures_enriched_text)) > 0")
         .withColumn("chunk_type", F.lit("figure_enriched"))
         .withColumn("content_text", F.col("page_figures_enriched_text"))
-        .drop("page_text", "page_table_text")
+        .drop("page_table_text")
     )
 
     silver = (
@@ -353,9 +384,10 @@ def main():
             F.sha2(
                 F.concat_ws(
                     "||",
-                    F.lit("v5"),  # Incrementar versión por cambio de lógica
+                    F.lit("v7"),  # Incrementar versión por agregar page_segment
                     F.col("chunk_type"),
                     F.coalesce(F.col("content_text"), F.lit("")),
+                    F.coalesce(F.col("page_text"), F.lit("")),
                 ),
                 256,
             ),
@@ -393,8 +425,9 @@ def main():
             "doc_id", "path", "modificationTime",
             "file_date", "file_type",
             "page_id", "page_num", "chunk_type", "content_text",
+            "page_text",
             "page_figures_enriched_text", "page_hash",
-            "topic_heuristic", "topic_llm", "topic_content",
+            "topic_heuristic", "topic_llm", "topic_content", "page_segment",
         )
         .mapInPandas(chunker, schema=OUT_SCHEMA)
         .withColumn(
@@ -431,9 +464,11 @@ def main():
       t.page_id = s.page_id,
       t.page_num = s.page_num,
       t.page_label = s.page_label,
+      t.page_text = s.page_text,
       t.topic_heuristic = s.topic_heuristic,
       t.topic_llm = s.topic_llm,
       t.topic_content = s.topic_content,
+      t.page_segment = s.page_segment,
       t.chunk_type = s.chunk_type,
       t.page_figures_enriched_text = s.page_figures_enriched_text,
       t.page_hash = s.page_hash,
@@ -444,8 +479,8 @@ def main():
     WHEN NOT MATCHED THEN INSERT (
       doc_id, path, modificationTime,
       file_date, file_type,
-      page_id, page_num, page_label,
-      topic_heuristic, topic_llm, topic_content,
+      page_id, page_num, page_label, page_text,
+      topic_heuristic, topic_llm, topic_content, page_segment,
       chunk_type,
       page_figures_enriched_text,
       page_hash,
@@ -454,8 +489,8 @@ def main():
     ) VALUES (
       s.doc_id, s.path, s.modificationTime,
       s.file_date, s.file_type,
-      s.page_id, s.page_num, s.page_label,
-      s.topic_heuristic, s.topic_llm, s.topic_content,
+      s.page_id, s.page_num, s.page_label, s.page_text,
+      s.topic_heuristic, s.topic_llm, s.topic_content, s.page_segment,
       s.chunk_type,
       s.page_figures_enriched_text,
       s.page_hash,

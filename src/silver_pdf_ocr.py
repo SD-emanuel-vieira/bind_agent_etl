@@ -72,6 +72,9 @@ def ensure_silver_table(silver_table: str):
           -- topic_heuristic: primera línea del texto
           topic_heuristic STRING,
           
+          -- page_segment: segmento de negocio detectado (Empresas, Corporate, Institucional, Minorista, BaaS, General)
+          page_segment STRING,
+          
           -- topic_llm: generado por LLM analizando la IMAGEN
           topic_llm STRING,
           topic_llm_error STRING,
@@ -107,7 +110,9 @@ def ensure_silver_table(silver_table: str):
         ("page_figures_text", "STRING"),
         ("page_figures_enriched_text", "STRING"), ("page_figures_enriched_error", "STRING"),
         ("page_figures_enriched_ts", "TIMESTAMP"), ("page_figures_enriched_model", "STRING"),
-        ("topic_heuristic", "STRING"), ("topic_llm", "STRING"),
+        ("topic_heuristic", "STRING"), 
+        ("page_segment", "STRING"),  # Segmento de negocio
+        ("topic_llm", "STRING"),
         ("topic_llm_error", "STRING"), ("topic_llm_ts", "TIMESTAMP"), ("topic_llm_model", "STRING"),
         # topic_content: generado por LLM analizando el texto (no imagen)
         ("topic_content", "STRING"), ("topic_content_error", "STRING"),
@@ -167,6 +172,54 @@ def add_topic_heuristic(df):
     ).otherwise(first_line)
     
     return df.withColumn("topic_heuristic", topic_heuristic)
+
+
+def add_page_segment(df):
+    """
+    Detecta el segmento de negocio basándose en page_text, page_table_text y page_figures_text.
+    Segmentos: Empresas, Corporate, Institucional, Minorista, BaaS
+    Si encuentra más de un segmento, asigna 'General'.
+    Si no encuentra ninguno, asigna NULL.
+    """
+    # Combinar todos los campos de texto en uno solo para buscar (case insensitive)
+    combined = F.lower(F.concat_ws(
+        " ",
+        F.coalesce(F.col("page_text"), F.lit("")),
+        F.coalesce(F.col("page_table_text"), F.lit("")),
+        F.coalesce(F.col("page_figures_text"), F.lit(""))
+    ))
+    
+    # Detectar cada segmento
+    has_empresas = combined.contains("empresas")
+    has_corporate = combined.contains("corporate")
+    has_institucional = combined.contains("institucional")
+    has_minorista = combined.contains("minorista")
+    has_baas = combined.contains("baas")
+    
+    # Contar cuántos segmentos se encontraron
+    segment_count = (
+        has_empresas.cast("int") +
+        has_corporate.cast("int") +
+        has_institucional.cast("int") +
+        has_minorista.cast("int") +
+        has_baas.cast("int")
+    )
+    
+    # Asignar valor según la lógica:
+    # - Más de 1 segmento → "General"
+    # - Exactamente 1 segmento → el nombre del segmento
+    # - Ningún segmento → NULL
+    page_segment = (
+        F.when(segment_count > 1, F.lit("BIND"))
+        .when(has_empresas, F.lit("Empresas"))
+        .when(has_corporate, F.lit("Corporate"))
+        .when(has_institucional, F.lit("Institucional"))
+        .when(has_minorista, F.lit("Minorista"))
+        .when(has_baas, F.lit("BaaS"))
+        .otherwise(F.lit(None).cast("string"))
+    )
+    
+    return df.withColumn("page_segment", page_segment)
 
 
 def main():
@@ -343,6 +396,9 @@ def main():
 
     # Agregar topic_heuristic (basado en page_text, no tablas)
     updates = add_topic_heuristic(updates)
+    
+    # Agregar page_segment (segmento de negocio detectado)
+    updates = add_page_segment(updates)
 
     # Agregar columnas de enrichment como NULL
     updates = (

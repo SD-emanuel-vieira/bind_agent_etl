@@ -54,6 +54,9 @@ def ensure_embeddings_table(emb_table: str) -> None:
           topic_llm         STRING,
           topic_content     STRING,
           
+          -- Segmento de negocio
+          page_segment      STRING,
+          
           -- Metadata estructurada (JSON)
           metadata_enrich   STRING,
           
@@ -89,6 +92,7 @@ def ensure_cdf_enabled(emb_table: str) -> None:
         ("topic_heuristic", "STRING"),
         ("topic_llm", "STRING"),
         ("topic_content", "STRING"),
+        ("page_segment", "STRING"),
         ("metadata_enrich", "STRING"),
     ]
     for col_name, col_type in desired:
@@ -232,6 +236,7 @@ def upsert_embeddings(emb_table: str, updates: DataFrame) -> None:
       t.topic_heuristic  = s.topic_heuristic,
       t.topic_llm        = s.topic_llm,
       t.topic_content    = s.topic_content,
+      t.page_segment     = s.page_segment,
       t.metadata_enrich  = s.metadata_enrich,
       t.chunk_text       = s.chunk_text,
       t.chunk_char_len   = s.chunk_char_len,
@@ -245,7 +250,7 @@ def upsert_embeddings(emb_table: str, updates: DataFrame) -> None:
       chunk_id, chunk_type, doc_id, path, modificationTime,
       file_date, file_type,
       page_id, page_num, 
-      topic_heuristic, topic_llm, topic_content, metadata_enrich,
+      topic_heuristic, topic_llm, topic_content, page_segment, metadata_enrich,
       chunk_text, chunk_char_len, embed_text, chunk_hash,
       embedding, embedding_model, embedding_dim, embed_ts
     )
@@ -253,7 +258,7 @@ def upsert_embeddings(emb_table: str, updates: DataFrame) -> None:
       s.chunk_id, s.chunk_type, s.doc_id, s.path, s.modificationTime,
       s.file_date, s.file_type,
       s.page_id, s.page_num,
-      s.topic_heuristic, s.topic_llm, s.topic_content, s.metadata_enrich,
+      s.topic_heuristic, s.topic_llm, s.topic_content, s.page_segment, s.metadata_enrich,
       s.chunk_text, s.chunk_char_len, s.embed_text, s.chunk_hash,
       s.embedding, s.embedding_model, s.embedding_dim, s.embed_ts
     )
@@ -290,6 +295,8 @@ def main() -> None:
         gold = gold.withColumn("topic_llm", F.lit(None).cast("string"))
     if "topic_content" not in gold.columns:
         gold = gold.withColumn("topic_content", F.lit(None).cast("string"))
+    if "page_segment" not in gold.columns:
+        gold = gold.withColumn("page_segment", F.lit(None).cast("string"))
     if "metadata_enrich" not in gold.columns:
         gold = gold.withColumn("metadata_enrich", F.lit(None).cast("string"))
 
@@ -297,7 +304,7 @@ def main() -> None:
         "chunk_id", "chunk_type", "doc_id", "path", "modificationTime",
         "file_date", "file_type",
         "page_id", "page_num", 
-        "topic_heuristic", "topic_llm", "topic_content", "metadata_enrich",
+        "topic_heuristic", "topic_llm", "topic_content", "page_segment", "metadata_enrich",
         "chunk_text"
     )
 
