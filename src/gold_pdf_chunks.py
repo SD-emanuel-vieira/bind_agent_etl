@@ -10,17 +10,20 @@ Tipos de chunks:
 import argparse
 from typing import Iterator, List, Dict
 import pandas as pd
+import re
 
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
 from pyspark.sql.utils import AnalysisException
 
 
+MAX_CHUNK_SIZE_CHARS = 7000
+
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--silver_table", required=True)
     p.add_argument("--gold_table", required=True)
-    p.add_argument("--chunk_size_chars", type=int, default=2500)
+    p.add_argument("--chunk_size_chars", type=int, default=7000)
     p.add_argument("--chunk_overlap_chars", type=int, default=250)
     p.add_argument("--min_chunk_chars", type=int, default=200)
     return p.parse_args()
@@ -93,59 +96,167 @@ def ensure_gold_table(gold_table: str):
         spark.sql(f"ALTER TABLE {gold_table} ADD COLUMNS ({', '.join(to_add)})")
 
 
+
 def chunk_text(text: str, chunk_size: int, overlap: int) -> List[str]:
-    """Fragmenta texto con overlap. Solo para texto narrativo."""
+    """
+    Fragmenta texto con lógica "smart" (sin cortar palabras/oraciones cuando es posible).
+
+    Garantías:
+    - Nunca devuelve chunks con longitud > chunk_size.
+    - Prioriza cortes por párrafo y por oración; si no se puede, corta por límite de palabra.
+    - Aplica overlap sin exceder el máximo; intenta evitar empezar el solape en mitad de una palabra.
+
+    Nota: Si una "palabra" individual supera chunk_size (muy raro), no hay forma de evitar el corte.
+    """
     if not text:
         return []
 
+    # Normalización suave: mantiene saltos de línea y párrafos, pero elimina trailing spaces.
     txt = "\n".join([ln.rstrip() for ln in text.splitlines()]).strip()
-    if len(txt) <= chunk_size:
-        return [txt]
+    if not txt:
+        return []
 
-    paras = [p.strip() for p in txt.split("\n\n") if p.strip()]
-    chunks = []
+    # Aseguramos parámetros válidos.
+    chunk_size = int(chunk_size) if chunk_size else 0
+    if chunk_size <= 0:
+        return []
+    overlap = int(overlap) if overlap else 0
+    overlap = max(0, min(overlap, chunk_size - 1))
+
+    def _split_by_whitespace(s: str, max_len: int) -> List[str]:
+        s = (s or "").strip()
+        if not s:
+            return []
+        if len(s) <= max_len:
+            return [s]
+
+        out: List[str] = []
+        rest = s
+        while len(rest) > max_len:
+            cut = rest.rfind(" ", 0, max_len + 1)
+            # Si no hay espacios (o quedan muy al inicio), cortamos "duro" para avanzar.
+            if cut < max(50, int(max_len * 0.3)):
+                cut = max_len
+            part = rest[:cut].rstrip()
+            if part:
+                out.append(part)
+            rest = rest[cut:].lstrip()
+            if not rest:
+                break
+        if rest:
+            out.append(rest)
+        return out
+
+    # Split de oraciones: simple y robusto (no perfecto con abreviaturas, pero suficiente).
+    _SENT_SPLIT_RE = re.compile(r"(?<=[\.\!\?])\s+")
+
+    def _split_paragraph_into_sentence_chunks(p: str, max_len: int) -> List[str]:
+        p = (p or "").strip()
+        if not p:
+            return []
+        if len(p) <= max_len:
+            return [p]
+
+        sentences = [s.strip() for s in _SENT_SPLIT_RE.split(p) if s.strip()]
+        if not sentences:
+            return _split_by_whitespace(p, max_len)
+
+        # Si una oración es demasiado larga, la partimos por whitespace.
+        normalized: List[str] = []
+        for s in sentences:
+            if len(s) <= max_len:
+                normalized.append(s)
+            else:
+                normalized.extend(_split_by_whitespace(s, max_len))
+
+        chunks: List[str] = []
+        cur = ""
+        for s in normalized:
+            candidate = (cur + " " + s).strip() if cur else s
+            if len(candidate) <= max_len:
+                cur = candidate
+            else:
+                if cur:
+                    chunks.append(cur)
+                cur = s if len(s) <= max_len else ""  # (por seguridad)
+        if cur:
+            chunks.append(cur)
+        return chunks
+
+    # 1) Intentamos chunking por párrafos (doble salto de línea).
+    paragraphs = [p.strip() for p in txt.split("\n\n") if p.strip()]
+    if not paragraphs:
+        paragraphs = [txt]
+
+    base_chunks: List[str] = []
     cur = ""
 
-    def flush_cur():
+    def _flush():
         nonlocal cur
-        if cur.strip():
-            chunks.append(cur.strip())
+        if cur and cur.strip():
+            base_chunks.append(cur.strip())
         cur = ""
 
-    for p in paras:
-        if not cur:
-            cur = p
-        elif len(cur) + 2 + len(p) <= chunk_size:
-            cur = cur + "\n\n" + p
-        else:
-            flush_cur()
-            cur = p
+    for p in paragraphs:
+        # Si un párrafo excede, lo partimos por oraciones (o whitespace).
+        p_pieces = [p] if len(p) <= chunk_size else _split_paragraph_into_sentence_chunks(p, chunk_size)
 
-    flush_cur()
+        for j, piece in enumerate(p_pieces):
+            sep = "\n\n" if (cur and j == 0) else (" " if cur else "")
+            candidate = (cur + sep + piece).strip() if cur else piece
+            if len(candidate) <= chunk_size:
+                cur = candidate
+            else:
+                _flush()
+                # Si aun así no entra (raro), split por whitespace.
+                if len(piece) <= chunk_size:
+                    cur = piece
+                else:
+                    for part in _split_by_whitespace(piece, chunk_size):
+                        if len(part) <= chunk_size:
+                            cur = part
+                            _flush()
+                    cur = ""
 
-    fixed = []
-    for c in chunks:
-        if len(c) <= chunk_size:
-            fixed.append(c)
-        else:
-            i = 0
-            while i < len(c):
-                fixed.append(c[i:i + chunk_size])
-                i += max(1, chunk_size - overlap)
+    _flush()
 
-    final = []
-    for i, c in enumerate(fixed):
-        if i == 0:
-            final.append(c)
-        else:
-            prev = final[-1]
-            tail = prev[-overlap:] if overlap > 0 and len(prev) > overlap else ""
-            merged = (tail + "\n" + c).strip() if tail else c
-            if len(merged) > chunk_size + overlap:
-                merged = merged[-(chunk_size + overlap):]
-            final.append(merged)
+    if not base_chunks:
+        return []
 
-    return final
+    # 2) Overlap: añadimos una cola del chunk anterior al inicio del siguiente sin exceder el máximo.
+    if overlap <= 0 or len(base_chunks) == 1:
+        return base_chunks
+
+    def _tail_at_word_boundary(prev: str, max_tail_len: int) -> str:
+        if max_tail_len <= 0:
+            return ""
+        tail = prev[-max_tail_len:]
+        # Intento de alinear el inicio del tail a un límite de palabra:
+        # si empieza en mitad de palabra, descartamos hasta el próximo whitespace.
+        if tail and not tail[0].isspace():
+            m = re.search(r"\s+", tail)
+            if m:
+                tail = tail[m.end():]
+        return tail.lstrip()
+
+    out: List[str] = [base_chunks[0]]
+    for i in range(1, len(base_chunks)):
+        ch = base_chunks[i]
+        # Calculamos cuánto overlap cabe sin pasarnos de chunk_size (1 char para el separador \n).
+        tail_budget = chunk_size - len(ch) - 1
+        if tail_budget <= 0:
+            out.append(ch)
+            continue
+        tail_len = min(overlap, tail_budget)
+        tail = _tail_at_word_boundary(out[-1], tail_len)
+        merged = (tail + "\n" + ch).strip() if tail else ch
+        # Seguridad: nunca exceder chunk_size.
+        if len(merged) > chunk_size:
+            merged = merged[-chunk_size:]
+        out.append(merged)
+
+    return out
+
 
 
 # Output schema
@@ -199,42 +310,123 @@ def make_chunks_map_in_pandas(chunk_size: int, overlap: int, min_chars: int):
                 # =============================================
                 # TABLAS: No fragmentar, cada tabla = 1 chunk
                 # =============================================
+                
                 if chunk_type == "table":
                     # El content_text puede tener múltiples tablas separadas por ---TABLE_SEPARATOR---
                     tables = text.split("---TABLE_SEPARATOR---")
-                    
-                    for idx, table_content in enumerate(tables):
+
+                    def _split_by_whitespace_local(s: str, max_len: int) -> List[str]:
+                        s = (s or "").strip()
+                        if not s:
+                            return []
+                        if len(s) <= max_len:
+                            return [s]
+                        out_parts: List[str] = []
+                        rest_s = s
+                        while len(rest_s) > max_len:
+                            cut = rest_s.rfind(" ", 0, max_len + 1)
+                            if cut < max(50, int(max_len * 0.3)):
+                                cut = max_len
+                            part = rest_s[:cut].rstrip()
+                            if part:
+                                out_parts.append(part)
+                            rest_s = rest_s[cut:].lstrip()
+                            if not rest_s:
+                                break
+                        if rest_s:
+                            out_parts.append(rest_s)
+                        return out_parts
+
+                    def _split_table_preserve_rows(table_text: str, max_len: int) -> List[str]:
+                        """Parte tablas grandes sin cortar filas (por saltos de línea) cuando es posible."""
+                        table_text = (table_text or "").strip()
+                        if not table_text:
+                            return []
+                        if len(table_text) <= max_len:
+                            return [table_text]
+
+                        lines = [ln.rstrip() for ln in table_text.splitlines()]
+                        out_chunks: List[str] = []
+                        cur_tbl = ""
+                        for ln in lines:
+                            # mantenemos filas vacías como separadores leves
+                            if ln == "":
+                                candidate = (cur_tbl + "\n").rstrip() if cur_tbl else ""
+                                if len(candidate) <= max_len:
+                                    cur_tbl = candidate
+                                else:
+                                    if cur_tbl.strip():
+                                        out_chunks.append(cur_tbl.strip())
+                                    cur_tbl = ""
+                                continue
+
+                            candidate = (cur_tbl + "\n" + ln).strip() if cur_tbl else ln.strip()
+                            if len(candidate) <= max_len:
+                                cur_tbl = candidate
+                            else:
+                                if cur_tbl.strip():
+                                    out_chunks.append(cur_tbl.strip())
+                                    cur_tbl = ""
+
+                                # Si una sola fila supera max_len, fallback por whitespace.
+                                if len(ln) > max_len:
+                                    parts = _split_by_whitespace_local(ln, max_len)
+                                    if parts:
+                                        out_chunks.extend([p.strip() for p in parts if p.strip()])
+                                else:
+                                    cur_tbl = ln.strip()
+
+                        if cur_tbl.strip():
+                            out_chunks.append(cur_tbl.strip())
+
+                        return out_chunks
+
+                    ci = 0
+                    for table_content in tables:
                         table_content = table_content.strip()
                         if not table_content or len(table_content) < 20:  # Mínimo para una tabla
                             continue
-                        
-                        rows.append({
-                            "doc_id": r.doc_id,
-                            "path": r.path,
-                            "modificationTime": r.modificationTime,
-                            "file_date": r.file_date,
-                            "file_type": r.file_type,
-                            "page_id": int(r.page_id) if r.page_id is not None else None,
-                            "page_num": int(r.page_num) if r.page_num is not None else None,
-                            "page_label": page_label,
-                            "page_text": r.page_text
-                                if isinstance(getattr(r, "page_text", None), str) else None,
-                            "topic_heuristic": r.topic_heuristic
-                                if isinstance(getattr(r, "topic_heuristic", None), str) else None,
-                            "topic_llm": r.topic_llm
-                                if isinstance(getattr(r, "topic_llm", None), str) else None,
-                            "topic_content": r.topic_content
-                                if isinstance(getattr(r, "topic_content", None), str) else None,
-                            "page_segment": r.page_segment
-                                if isinstance(getattr(r, "page_segment", None), str) else None,
-                            "chunk_type": "table",
-                            "page_figures_enriched_text": None,
-                            "page_hash": r.page_hash,
-                            "chunk_index": idx,
-                            "chunk_text": table_content,  # Tabla completa, sin fragmentar
-                            "chunk_len": len(table_content),
-                        })
+
+                        parts = (
+                            [table_content]
+                            if len(table_content) <= chunk_size
+                            else _split_table_preserve_rows(table_content, chunk_size)
+                        )
+
+                        for part in parts:
+                            part = (part or "").strip()
+                            if not part or len(part) < 20:
+                                continue
+                            rows.append({
+                                "doc_id": r.doc_id,
+                                "path": r.path,
+                                "modificationTime": r.modificationTime,
+                                "file_date": r.file_date,
+                                "file_type": r.file_type,
+                                "page_id": int(r.page_id) if r.page_id is not None else None,
+                                "page_num": int(r.page_num) if r.page_num is not None else None,
+                                "page_label": page_label,
+                                "page_text": r.page_text
+                                    if isinstance(getattr(r, "page_text", None), str) else None,
+                                "topic_heuristic": r.topic_heuristic
+                                    if isinstance(getattr(r, "topic_heuristic", None), str) else None,
+                                "topic_llm": r.topic_llm
+                                    if isinstance(getattr(r, "topic_llm", None), str) else None,
+                                "topic_content": r.topic_content
+                                    if isinstance(getattr(r, "topic_content", None), str) else None,
+                                "page_segment": r.page_segment
+                                    if isinstance(getattr(r, "page_segment", None), str) else None,
+
+                                "chunk_type": "table",
+                                "page_figures_enriched_text": None,
+                                "page_hash": r.page_hash,
+                                "chunk_index": ci,
+                                "chunk_text": part,  # Tabla completa o fragmento por filas
+                                "chunk_len": len(part),
+                            })
+                            ci += 1
                     continue
+
 
                 # =============================================
                 # TEXTO y FIGURE_ENRICHED: Chunking normal
@@ -286,9 +478,25 @@ def main():
 
     print(f"[gold_pdf_chunks] silver_table        = {args.silver_table}")
     print(f"[gold_pdf_chunks] gold_table          = {args.gold_table}")
-    print(f"[gold_pdf_chunks] chunk_size_chars    = {args.chunk_size_chars}")
-    print(f"[gold_pdf_chunks] chunk_overlap_chars = {args.chunk_overlap_chars}")
+    print(f"[gold_pdf_chunks] chunk_size_chars (requested)    = {args.chunk_size_chars}")
+    print(f"[gold_pdf_chunks] chunk_overlap_chars (requested) = {args.chunk_overlap_chars}")
     print(f"[gold_pdf_chunks] min_chunk_chars     = {args.min_chunk_chars}")
+
+    # Enforce chunk size: SOLO fragmentar si supera el máximo (p/embeddings).
+    requested_chunk_size = int(args.chunk_size_chars)
+    effective_chunk_size = MAX_CHUNK_SIZE_CHARS
+    if requested_chunk_size != effective_chunk_size:
+        print(
+            f"[gold_pdf_chunks] chunk_size_chars solicitado = {requested_chunk_size}. "
+            f"Se fuerza -> {effective_chunk_size} (solo se fragmenta si supera {MAX_CHUNK_SIZE_CHARS})."
+        )
+
+    effective_overlap = min(int(args.chunk_overlap_chars), max(0, effective_chunk_size - 1))
+    if int(args.chunk_overlap_chars) != effective_overlap:
+        print(f"[gold_pdf_chunks] chunk_overlap_chars ajustado -> {effective_overlap} (para no exceder chunk_size)")
+
+    print(f"[gold_pdf_chunks] chunk_size_chars (effective)     = {effective_chunk_size}")
+    print(f"[gold_pdf_chunks] chunk_overlap_chars (effective) = {effective_overlap}")
 
     ensure_gold_table(args.gold_table)
 
@@ -414,8 +622,8 @@ def main():
         return
 
     chunker = make_chunks_map_in_pandas(
-        chunk_size=args.chunk_size_chars,
-        overlap=args.chunk_overlap_chars,
+        chunk_size=effective_chunk_size,
+        overlap=effective_overlap,
         min_chars=args.min_chunk_chars,
     )
 
