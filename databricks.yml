@@ -81,7 +81,7 @@ variables:
   gold_table:
     default: ${var.catalog}.${var.schema}.pdf_chunks_gold
   chunk_size_chars:
-    default: 2500
+    default: 7000
   chunk_overlap_chars:
     default: 250
   min_chunk_chars:
