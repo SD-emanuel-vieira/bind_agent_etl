@@ -1,0 +1,70 @@
+# resources/bind_agent_etl_excel.jobs.yml
+# Pipeline ETL para archivos Excel - Matriz Empresas
+# Patrón idéntico a bind_agents_etl_jobs.yml (PDF)
+
+resources:
+  jobs:
+    excel_bronze_ingest:
+      name: bind_agents_etl_excel
+
+      tags:
+        project: bind_agents
+        source: excel
+        pipeline: bronze_silver
+
+      trigger:
+        file_arrival:
+          url: ${var.excel_input_path_trigger}
+          min_time_between_triggers_seconds: 60
+          wait_after_last_change_seconds: 120
+
+      # Serverless compute (reutilizable por todas las tasks)
+      environments:
+        - environment_key: etl_excel_serverless
+          spec:
+            environment_version: "2"
+            dependencies:
+              - "pandas"
+              - "openpyxl"
+
+      max_concurrent_runs: 1
+
+      tasks:
+        # -----------------------
+        # TASK 1: Bronze Excel (SERVERLESS)
+        # -----------------------
+        - task_key: bronze_excel_ingest
+          max_retries: 2
+          min_retry_interval_millis: 120000
+          timeout_seconds: 1800
+          spark_python_task:
+            python_file: ../../src/bronze_excel_ingest.py
+            parameters:
+              - --input_path
+              - ${var.excel_input_path}
+              - --checkpoint_path
+              - ${var.excel_checkpoint_path}
+              - --schema_location
+              - ${var.excel_schema_location}
+              - --bronze_table
+              - ${var.bronze_excel_table}
+              - --sheet_name
+              - ${var.excel_sheet_name}
+          environment_key: etl_excel_serverless
+        
+
+        # -----------------------
+        # TASK 2: Silver Excel (SERVERLESS)
+        # -----------------------
+        - task_key: silver_excel_transform
+          depends_on:
+            - task_key: bronze_excel_ingest
+          timeout_seconds: 3600
+          spark_python_task:
+            python_file: ../../src/silver_excel_transform.py
+            parameters:
+              - --bronze_table
+              - ${var.bronze_excel_table}
+              - --silver_table
+              - ${var.silver_excel_table}
+          environment_key: etl_excel_serverless

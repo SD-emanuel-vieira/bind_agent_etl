@@ -34,6 +34,38 @@ variables:
   ##======= Variables Bronze
   bronze_table:
     default: ${var.catalog}.${var.schema}.pdf_bronze
+    # -------------------------
+    # Excel Pipeline - Paths
+    # -------------------------
+  excel_input_path_trigger:
+    description: "Path del volume para trigger de file arrival (sin trailing slash)"
+    default: "/Volumes/${var.catalog}/${var.schema}/excel/"
+
+  excel_input_path:
+    description: "Path del volume donde llegan los archivos Excel"
+    default: "/Volumes/${var.catalog}/${var.schema}/excel/"
+
+  excel_checkpoint_path:
+    description: "Path para checkpoints del Auto Loader de Excel"
+    default: "/Volumes/${var.catalog}/${var.schema}/docs_state/excel/checkpoints/"
+
+  excel_schema_location:
+    description: "Path para schema inference del Auto Loader de Excel"
+    default: "/Volumes/${var.catalog}/${var.schema}/docs_state/excel/schema/"
+
+    # -------------------------
+    # Excel Pipeline - Tables
+    # -------------------------
+  bronze_excel_table:
+    description: "Tabla Bronze para datos de Excel"
+    default: "${var.catalog}.${var.schema}.bronze_excel"
+
+    # -------------------------
+    # Excel Pipeline - Config
+    # -------------------------
+  excel_sheet_name:
+    description: "Nombre de la hoja del Excel a procesar"
+    default: "BASE"
 
   ##======= Variables silver
   silver_table:
@@ -41,6 +73,10 @@ variables:
   # Opcional: dónde guardar imágenes por página si querés image_uri
   image_output_path:
     default: /Volumes/${var.catalog}/${var.schema}/docs_state/ai_parse_images/pdf_bronze/
+
+  silver_excel_table:
+    description: "Tabla Silver para datos de Excel transformados"
+    default: "${var.catalog}.${var.schema}.silver_excel"
 
   # variables to configure enrrich text
   do_enrich_graphs:
