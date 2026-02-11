@@ -4,164 +4,227 @@ bundle:
 include:
   - resources/**/*.yml
 
+# ==============================================================================
+# VARIABLES GENERALES
+# ==============================================================================
 variables:
+  # Catálogo y Schema compartidos por ambos pipelines
   catalog:
+    description: "Catálogo de Unity Catalog donde se crean todas las tablas"
     default: bind_agent
+  
   schema:
+    description: "Schema dentro del catálogo para organizar las tablas de documentos"
     default: docs
 
+  # Volúmenes compartidos
   landing_volume:
+    description: "Nombre del volumen donde llegan los archivos PDF"
     default: pdf
+  
   state_volume:
+    description: "Nombre del volumen para almacenar estados de Auto Loader (checkpoints, schemas)"
     default: docs_state
 
-  # Trigger (UI) usa /Volumes
+# ==============================================================================
+# PIPELINE PDF: Bronze -> Silver -> Gold -> Embeddings -> Vector Search
+# ==============================================================================
+
+  # -------------------------
+  # PDF Pipeline - Bronze Stage
+  # -------------------------
   input_path_trigger:
+    description: "Path del volumen para trigger de file arrival en la UI (formato /Volumes)"
     default: /Volumes/${var.catalog}/${var.schema}/${var.landing_volume}/
 
-  # Auto Loader usa dbfs:/Volumes
   input_path:
+    description: "Path del volumen donde Auto Loader lee los PDFs (formato /Volumes)"
     default: /Volumes/${var.catalog}/${var.schema}/${var.landing_volume}/
 
   state_root:
+    description: "Path raíz en DBFS para almacenar todos los estados de Auto Loader"
     default: dbfs:/Volumes/${var.catalog}/${var.schema}/${var.state_volume}/
 
   schema_location:
+    description: "Path donde Auto Loader guarda el schema inferido de los PDFs en Bronze"
     default: ${var.state_root}autoloader/pdf_bronze/schema/
+  
   checkpoint_path:
+    description: "Path donde Auto Loader guarda los checkpoints para procesar PDFs incrementalmente"
     default: ${var.state_root}autoloader/pdf_bronze/checkpoints/
 
-  ##======= Variables Bronze
   bronze_table:
+    description: "Nombre completo de la tabla Bronze donde se almacenan los PDFs en formato raw"
     default: ${var.catalog}.${var.schema}.pdf_bronze
-    # -------------------------
-    # Excel Pipeline - Paths
-    # -------------------------
-  excel_input_path_trigger:
-    description: "Path del volume para trigger de file arrival (sin trailing slash)"
-    default: "/Volumes/${var.catalog}/${var.schema}/excel/"
 
-  excel_input_path:
-    description: "Path del volume donde llegan los archivos Excel"
-    default: "/Volumes/${var.catalog}/${var.schema}/excel/"
-
-  excel_checkpoint_path:
-    description: "Path para checkpoints del Auto Loader de Excel"
-    default: "/Volumes/${var.catalog}/${var.schema}/docs_state/excel/checkpoints/"
-
-  excel_schema_location:
-    description: "Path para schema inference del Auto Loader de Excel"
-    default: "/Volumes/${var.catalog}/${var.schema}/docs_state/excel/schema/"
-
-    # -------------------------
-    # Excel Pipeline - Tables
-    # -------------------------
-  bronze_excel_table:
-    description: "Tabla Bronze para datos de Excel"
-    default: "${var.catalog}.${var.schema}.bronze_excel"
-
-    # -------------------------
-    # Excel Pipeline - Config
-    # -------------------------
-  excel_sheet_name:
-    description: "Nombre de la hoja del Excel a procesar"
-    default: "BASE"
-
-  ##======= Variables silver
+  # -------------------------
+  # PDF Pipeline - Silver Stage
+  # -------------------------
   silver_table:
+    description: "Nombre completo de la tabla Silver con PDFs procesados y texto extraído por OCR"
     default: ${var.catalog}.${var.schema}.pdf_ocr_silver
-  # Opcional: dónde guardar imágenes por página si querés image_uri
+  
   image_output_path:
+    description: "Path donde se guardan las imágenes extraídas de cada página del PDF para análisis"
     default: /Volumes/${var.catalog}/${var.schema}/docs_state/ai_parse_images/pdf_bronze/
 
-  silver_excel_table:
-    description: "Tabla Silver para datos de Excel transformados"
-    default: "${var.catalog}.${var.schema}.silver_excel"
-
-  # variables to configure enrrich text
+  # Variables para enriquecimiento con gráficos
   do_enrich_graphs:
-    description: "Flag que marca se se analiza con LLM los graficos"
+    description: "Flag para activar/desactivar el análisis de gráficos con LLM en páginas del PDF"
     default: "true"
+  
   enrich_model:
-    description: "Endpoint LLM para topic por página"
+    description: "Nombre del endpoint LLM para analizar gráficos en las páginas"
     default: "databricks-gemma-3-12b"
 
-  # variables to configure topic heuristic
+  # Variables para enriquecimiento con topic heurístico
   do_enrich_topic:
-    description: "Flag que marca se se analiza con LLM los topicos"
+    description: "Flag para activar/desactivar la generación de topics con LLM por página"
     default: "true"
+  
   topic_model:
-    description: "Endpoint LLM para topic por página"
+    description: "Nombre del endpoint LLM para generar topics de cada página"
     default: "databricks-gemma-3-12b"
+  
   topic_min_chars:
-    description: "Minimo de caracteres de page_text usados para generar el topic"
+    description: "Mínimo de caracteres de page_text requeridos para generar el topic"
     default: 50
 
-  # parametros para topic_content
+  # Variables para topic_content
   do_enrich_topic_content:
+    description: "Flag para activar/desactivar la generación de topic_content con LLM"
     default: "true"
+  
   topic_content_model:
+    description: "Nombre del endpoint LLM para generar topic_content de cada página"
     default: "databricks-gemma-3-12b"
+  
   topic_content_min_chars:
+    description: "Mínimo de caracteres de page_text requeridos para generar topic_content"
     default: "50"
 
-  # parametros de metadata enrich
+  # Variables para metadata enrich
   do_enrich_metadata:
+    description: "Flag para activar/desactivar el enriquecimiento de metadata con LLM"
     default: "true"
+  
   metadata_model:
+    description: "Nombre del endpoint LLM para extraer y enriquecer metadata del documento"
     default: "databricks-gemma-3-12b"
+  
   metadata_min_chars:
+    description: "Mínimo de caracteres de page_text requeridos para enriquecer metadata"
     default: "100"
-    
-  ##======= Variables Gold
+
+  # -------------------------
+  # PDF Pipeline - Gold Stage
+  # -------------------------
   gold_table:
+    description: "Nombre completo de la tabla Gold con chunks de texto listos para embeddings"
     default: ${var.catalog}.${var.schema}.pdf_chunks_gold
+  
   chunk_size_chars:
+    description: "Tamaño máximo en caracteres de cada chunk de texto"
     default: 7000
+  
   chunk_overlap_chars:
+    description: "Cantidad de caracteres de solapamiento entre chunks consecutivos"
     default: 250
+  
   min_chunk_chars:
+    description: "Tamaño mínimo en caracteres para considerar un chunk válido"
     default: 200
 
-  ##======= Variables de Embeddings
+  # -------------------------
+  # PDF Pipeline - Embeddings Stage
+  # -------------------------
   embeddings_table:
-    description: "Tabla destino con embeddings"
+    description: "Nombre completo de la tabla donde se almacenan los chunks con sus embeddings"
     default: "bind_agent.docs.pdf_chunks_embeddings"
 
   embedding_endpoint:
-    description: "Serving endpoint de embeddings"
+    description: "Nombre del serving endpoint que genera los vectores de embeddings"
     default: "databricks-bge-large-en"
 
-  ##======= Vector Search
+  # -------------------------
+  # PDF Pipeline - Vector Search Stage
+  # -------------------------
   vs_endpoint:
-    description: "Vector Search endpoint name"
+    description: "Nombre del Vector Search endpoint donde se crea el índice"
     default: "bind_agent_vs"
 
   vs_index_full_name:
-    description: "UC full name for the Vector Search index (catalog.schema.index)"
+    description: "Nombre completo del índice de Vector Search en formato catalog.schema.index"
     default: "${var.catalog}.${var.schema}.pdf_chunks_vs_idx"
 
   vs_primary_key:
-    description: "Primary key column in the embeddings table"
+    description: "Nombre de la columna que actúa como primary key en la tabla de embeddings"
     default: "chunk_id"
 
   vs_embedding_column:
-    description: "Embedding vector column in the embeddings table"
+    description: "Nombre de la columna que contiene los vectores de embeddings"
     default: "embedding"
 
   vs_pipeline_type:
-    description: "TRIGGERED or CONTINUOUS"
+    description: "Tipo de sincronización del índice: TRIGGERED (manual) o CONTINUOUS (automático)"
     default: "TRIGGERED"
 
   vs_poll_seconds:
+    description: "Intervalo en segundos para verificar el estado del índice durante creación/sync"
     default: 15
 
   vs_endpoint_timeout_seconds:
+    description: "Timeout en segundos para esperar que el Vector Search endpoint esté listo"
     default: 1200
 
   vs_index_timeout_seconds:
+    description: "Timeout en segundos para esperar que el índice de Vector Search esté listo"
     default: 1800
 
+# ==============================================================================
+# PIPELINE EXCEL: Bronze -> Silver
+# ==============================================================================
+
+  # -------------------------
+  # Excel Pipeline - Paths
+  # -------------------------
+  excel_input_path_trigger:
+    description: "Path del volumen para trigger de file arrival de archivos Excel (sin trailing slash)"
+    default: "/Volumes/${var.catalog}/${var.schema}/excel/"
+
+  excel_input_path:
+    description: "Path del volumen donde llegan los archivos Excel para procesamiento"
+    default: "/Volumes/${var.catalog}/${var.schema}/excel/"
+
+  excel_checkpoint_path:
+    description: "Path donde Auto Loader guarda checkpoints para procesar Excel incrementalmente"
+    default: "/Volumes/${var.catalog}/${var.schema}/docs_state/excel/checkpoints/"
+
+  excel_schema_location:
+    description: "Path donde Auto Loader guarda el schema inferido de los archivos Excel"
+    default: "/Volumes/${var.catalog}/${var.schema}/docs_state/excel/schema/"
+
+  # -------------------------
+  # Excel Pipeline - Bronze Stage
+  # -------------------------
+  bronze_excel_table:
+    description: "Nombre completo de la tabla Bronze donde se almacenan los datos raw de Excel"
+    default: "${var.catalog}.${var.schema}.bronze_excel"
+
+  excel_sheet_name:
+    description: "Nombre de la hoja dentro del archivo Excel que se debe procesar"
+    default: "BASE"
+
+  # -------------------------
+  # Excel Pipeline - Silver Stage
+  # -------------------------
+  silver_excel_table:
+    description: "Nombre completo de la tabla Silver con datos de Excel transformados y limpios"
+    default: "${var.catalog}.${var.schema}.silver_excel"
+
+# ==============================================================================
+# RECURSOS COMPARTIDOS
+# ==============================================================================
 resources:
   schemas:
     docs_schema:
@@ -182,6 +245,9 @@ resources:
       name: ${var.state_volume}
       comment: "Estado: checkpoints y schemaLocation (Auto Loader)"
 
+# ==============================================================================
+# TARGETS (ENTORNOS)
+# ==============================================================================
 targets:
   dev:
     default: true
