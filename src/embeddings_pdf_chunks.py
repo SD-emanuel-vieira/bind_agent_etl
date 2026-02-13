@@ -54,6 +54,9 @@ def ensure_embeddings_table(emb_table: str) -> None:
           topic_llm         STRING,
           topic_content     STRING,
           
+          -- Context field (desde Silver/Gold)
+          context_text      STRING,
+          
           -- Segmento de negocio
           page_segment      STRING,
           
@@ -92,6 +95,7 @@ def ensure_cdf_enabled(emb_table: str) -> None:
         ("topic_heuristic", "STRING"),
         ("topic_llm", "STRING"),
         ("topic_content", "STRING"),
+        ("context_text", "STRING"),
         ("page_segment", "STRING"),
         ("metadata_enrich", "STRING"),
     ]
@@ -114,12 +118,29 @@ def ensure_cdf_enabled(emb_table: str) -> None:
 #     )
 
 def normalize_embed_text(df: DataFrame) -> DataFrame:
+    """
+    Prepara el texto para embeddings con la siguiente lógica:
+    1. Limpia prefijos [SOURCE:...][TOPIC:...] del chunk_text
+    2. Si existe context_text (no NULL), lo prepone: "context_text\n\nchunk_text"
+    3. Agrega topics unificados como prefijo [TOPIC: ...]
+    """
+    # Limpiar chunk_text de prefijos legacy
     cleaned = F.regexp_replace(
         F.col("chunk_text"),
         r"(?s)^\[SOURCE:[^\]]*\]\s*\n\[TOPIC:[^\]]*\]\s*\n\s*",
         "",
     )
     cleaned = F.trim(cleaned)
+
+    # Combinar context_text + cleaned si context_text existe
+    text_with_context = F.when(
+        F.col("context_text").isNotNull() & (F.length(F.trim(F.col("context_text"))) > 0),
+        F.concat(
+            F.trim(F.col("context_text")),
+            F.lit("\n\n"),
+            cleaned
+        )
+    ).otherwise(cleaned)
 
     # Combinar los 3 campos de topic, separados por " | ", omitiendo nulos/vacíos
     topics = F.array_join(
@@ -134,10 +155,11 @@ def normalize_embed_text(df: DataFrame) -> DataFrame:
         " | "
     )
 
+    # Texto final: [TOPIC: ...] + text_with_context
     embed = F.when(
         F.length(topics) > 0,
-        F.concat(F.lit("[TOPIC: "), topics, F.lit("]\n"), cleaned)
-    ).otherwise(cleaned)
+        F.concat(F.lit("[TOPIC: "), topics, F.lit("]\n"), text_with_context)
+    ).otherwise(text_with_context)
 
     return (
         df.withColumn("embed_text", embed)
@@ -269,6 +291,7 @@ def upsert_embeddings(emb_table: str, updates: DataFrame) -> None:
       t.topic_heuristic  = s.topic_heuristic,
       t.topic_llm        = s.topic_llm,
       t.topic_content    = s.topic_content,
+      t.context_text     = s.context_text,
       t.page_segment     = s.page_segment,
       t.metadata_enrich  = s.metadata_enrich,
       t.chunk_text       = s.chunk_text,
@@ -283,7 +306,8 @@ def upsert_embeddings(emb_table: str, updates: DataFrame) -> None:
       chunk_id, chunk_type, doc_id, path, modificationTime,
       file_date, file_type,
       page_id, page_num, 
-      topic_heuristic, topic_llm, topic_content, page_segment, metadata_enrich,
+      topic_heuristic, topic_llm, topic_content, context_text,
+      page_segment, metadata_enrich,
       chunk_text, chunk_char_len, embed_text, chunk_hash,
       embedding, embedding_model, embedding_dim, embed_ts
     )
@@ -291,7 +315,8 @@ def upsert_embeddings(emb_table: str, updates: DataFrame) -> None:
       s.chunk_id, s.chunk_type, s.doc_id, s.path, s.modificationTime,
       s.file_date, s.file_type,
       s.page_id, s.page_num,
-      s.topic_heuristic, s.topic_llm, s.topic_content, s.page_segment, s.metadata_enrich,
+      s.topic_heuristic, s.topic_llm, s.topic_content, s.context_text,
+      s.page_segment, s.metadata_enrich,
       s.chunk_text, s.chunk_char_len, s.embed_text, s.chunk_hash,
       s.embedding, s.embedding_model, s.embedding_dim, s.embed_ts
     )
@@ -355,6 +380,8 @@ def main() -> None:
         gold = gold.withColumn("topic_llm", F.lit(None).cast("string"))
     if "topic_content" not in gold.columns:
         gold = gold.withColumn("topic_content", F.lit(None).cast("string"))
+    if "context_text" not in gold.columns:
+        gold = gold.withColumn("context_text", F.lit(None).cast("string"))
     if "page_segment" not in gold.columns:
         gold = gold.withColumn("page_segment", F.lit(None).cast("string"))
     if "metadata_enrich" not in gold.columns:
@@ -364,7 +391,9 @@ def main() -> None:
         "chunk_id", "chunk_type", "doc_id", "path", "modificationTime",
         "file_date", "file_type",
         "page_id", "page_num", 
-        "topic_heuristic", "topic_llm", "topic_content", "page_segment", "metadata_enrich",
+        "topic_heuristic", "topic_llm", "topic_content", 
+        "context_text",
+        "page_segment", "metadata_enrich",
         "chunk_text"
     )
 

@@ -15,6 +15,40 @@ from pyspark.sql import functions as F
 from pyspark.sql.functions import expr
 
 
+# ==============================================================================
+# CONTEXTOS PARA ENRIQUECIMIENTO DE CHUNKS
+# ==============================================================================
+# Mapeo de topics a contextos específicos para enriquecer el texto del chunk
+# INSTRUCCIONES PARA AGREGAR NUEVOS CONTEXTOS:
+# 1. Agregar nueva entrada al diccionario con el topic exacto como key
+# 2. El contexto se agregará ANTES del texto original del chunk
+# 3. Esto mejora el retrieval vectorial para queries relacionadas
+TOPIC_CONTEXT_MAP = {
+    "P&L BIND por segmento": (
+        "Esta tabla muestra el Resultado de gestión neto AxI por Banca Comercial "
+        "(Corporate, Empresas, Institucional, Minorista, BaaS) y Tesorería"
+    ),
+    # Agregar futuros contextos aquí siguiendo el mismo patrón:
+    # "Evolución MF": "Esta gráfica muestra la evolución temporal del margen financiero...",
+    # "Balance General": "Esta tabla presenta el balance general consolidado...",
+}
+
+
+def get_context_for_topic(topic):
+    """
+    Retorna el contexto correspondiente a un topic si existe.
+    
+    Args:
+        topic: String del topic detectado (topic_llm o topic_content)
+    
+    Returns:
+        String con el contexto o None si no hay contexto definido
+    """
+    if not topic:
+        return None
+    return TOPIC_CONTEXT_MAP.get(topic)
+
+
 def str2bool(v):
     if isinstance(v, bool): return v
     if v is None: return False
@@ -239,12 +273,21 @@ def enrich_topic_llm(silver_table: str, image_output_path: str, topic_model: str
     if detected_count > 0:
         detected_updates = (
             pages_with_detected_topic
+            .withColumn("context_text", 
+                F.udf(get_context_for_topic, "string")(F.col("detected_topic")))
+            .withColumn(
+                "context_template",
+                F.when(F.col("context_text").isNotNull(), F.col("detected_topic"))
+                 .otherwise(F.lit(None).cast("string"))
+            )
             .select(
                 "doc_id", "modificationTime", "page_id",
                 F.col("detected_topic").alias("topic_llm"),
                 F.lit(None).cast("string").alias("topic_llm_error"),
                 F.current_timestamp().alias("topic_llm_ts"),
-                F.lit("deterministic_rule").alias("topic_llm_model")
+                F.lit("deterministic_rule").alias("topic_llm_model"),
+                "context_template",
+                "context_text"
             )
         )
         
@@ -260,7 +303,9 @@ def enrich_topic_llm(silver_table: str, image_output_path: str, topic_model: str
             t.topic_llm = s.topic_llm,
             t.topic_llm_error = s.topic_llm_error,
             t.topic_llm_ts = s.topic_llm_ts,
-            t.topic_llm_model = s.topic_llm_model
+            t.topic_llm_model = s.topic_llm_model,
+            t.context_template = s.context_template,
+            t.context_text = s.context_text
         """)
         
         print(f"[enrich_topic_llm] Actualizado {detected_count} páginas con topic detectado.")
@@ -335,9 +380,18 @@ def enrich_topic_llm(silver_table: str, image_output_path: str, topic_model: str
         .withColumn("topic_llm_error", F.col("topic_out.errorMessage").cast("string"))
         .withColumn("topic_llm_ts", F.current_timestamp())
         .withColumn("topic_llm_model", F.lit(topic_model))
+        # Agregar contexto basado en el topic detectado por LLM
+        .withColumn("context_text", 
+            F.udf(get_context_for_topic, "string")(F.col("topic_llm")))
+        .withColumn(
+            "context_template",
+            F.when(F.col("context_text").isNotNull(), F.col("topic_llm"))
+             .otherwise(F.lit(None).cast("string"))
+        )
         .select(
             "doc_id", "modificationTime", "page_id",
-            "topic_llm", "topic_llm_error", "topic_llm_ts", "topic_llm_model"
+            "topic_llm", "topic_llm_error", "topic_llm_ts", "topic_llm_model",
+            "context_template", "context_text"
         )
     )
     
@@ -354,7 +408,9 @@ def enrich_topic_llm(silver_table: str, image_output_path: str, topic_model: str
         t.topic_llm = s.topic_llm,
         t.topic_llm_error = s.topic_llm_error,
         t.topic_llm_ts = s.topic_llm_ts,
-        t.topic_llm_model = s.topic_llm_model
+        t.topic_llm_model = s.topic_llm_model,
+        t.context_template = s.context_template,
+        t.context_text = s.context_text
     """)
     
     print(f"[enrich_topic_llm] Actualizado topic_llm para {matched_count} páginas vía LLM.")
@@ -432,12 +488,21 @@ def enrich_topic_content(silver_table: str, topic_content_model: str, min_chars:
     if detected_count > 0:
         detected_updates = (
             pages_with_detected_topic
+            .withColumn("context_text", 
+                F.udf(get_context_for_topic, "string")(F.col("detected_topic")))
+            .withColumn(
+                "context_template",
+                F.when(F.col("context_text").isNotNull(), F.col("detected_topic"))
+                 .otherwise(F.lit(None).cast("string"))
+            )
             .select(
                 "doc_id", "modificationTime", "page_id",
                 F.col("detected_topic").alias("topic_content"),
                 F.lit(None).cast("string").alias("topic_content_error"),
                 F.current_timestamp().alias("topic_content_ts"),
-                F.lit("deterministic_rule").alias("topic_content_model")
+                F.lit("deterministic_rule").alias("topic_content_model"),
+                "context_template",
+                "context_text"
             )
         )
         
@@ -453,7 +518,9 @@ def enrich_topic_content(silver_table: str, topic_content_model: str, min_chars:
             t.topic_content = s.topic_content,
             t.topic_content_error = s.topic_content_error,
             t.topic_content_ts = s.topic_content_ts,
-            t.topic_content_model = s.topic_content_model
+            t.topic_content_model = s.topic_content_model,
+            t.context_template = s.context_template,
+            t.context_text = s.context_text
         """)
         
         print(f"[enrich_topic_content] Actualizado {detected_count} páginas con topic detectado.")
@@ -511,9 +578,18 @@ def enrich_topic_content(silver_table: str, topic_content_model: str, min_chars:
         .withColumn("topic_content_error", F.col("topic_out.errorMessage").cast("string"))
         .withColumn("topic_content_ts", F.current_timestamp())
         .withColumn("topic_content_model", F.lit(topic_content_model))
+        # Agregar contexto basado en el topic detectado por LLM
+        .withColumn("context_text", 
+            F.udf(get_context_for_topic, "string")(F.col("topic_content")))
+        .withColumn(
+            "context_template",
+            F.when(F.col("context_text").isNotNull(), F.col("topic_content"))
+             .otherwise(F.lit(None).cast("string"))
+        )
         .select(
             "doc_id", "modificationTime", "page_id",
-            "topic_content", "topic_content_error", "topic_content_ts", "topic_content_model"
+            "topic_content", "topic_content_error", "topic_content_ts", "topic_content_model",
+            "context_template", "context_text"
         )
     )
     
@@ -530,7 +606,9 @@ def enrich_topic_content(silver_table: str, topic_content_model: str, min_chars:
         t.topic_content = s.topic_content,
         t.topic_content_error = s.topic_content_error,
         t.topic_content_ts = s.topic_content_ts,
-        t.topic_content_model = s.topic_content_model
+        t.topic_content_model = s.topic_content_model,
+        t.context_template = s.context_template,
+        t.context_text = s.context_text
     """)
     
     print(f"[enrich_topic_content] Actualizado topic_content para {llm_count} páginas vía LLM.")
