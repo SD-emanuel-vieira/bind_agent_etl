@@ -298,6 +298,33 @@ def upsert_embeddings(emb_table: str, updates: DataFrame) -> None:
     """)
 
 
+def sync_metadata_enrich_from_gold(emb_table: str, gold_df: DataFrame) -> None:
+    """
+    Sincroniza metadata_enrich desde Gold hacia la tabla de embeddings
+    sin recalcular embeddings cuando solo cambian metadatos.
+    """
+    if "metadata_enrich" not in gold_df.columns:
+        return
+
+    src = (
+        gold_df
+        .select(
+            "chunk_id",
+            F.col("metadata_enrich").cast("string").alias("metadata_enrich")
+        )
+        .dropDuplicates(["chunk_id"])
+    )
+
+    src.createOrReplaceTempView("emb_metadata_sync_src")
+    spark.sql(f"""
+    MERGE INTO {emb_table} t
+    USING emb_metadata_sync_src s
+    ON t.chunk_id = s.chunk_id
+    WHEN MATCHED AND coalesce(t.metadata_enrich, '') <> coalesce(s.metadata_enrich, '') THEN
+      UPDATE SET t.metadata_enrich = s.metadata_enrich
+    """)
+
+
 def main() -> None:
     args = parse_args()
 
@@ -340,6 +367,9 @@ def main() -> None:
         "topic_heuristic", "topic_llm", "topic_content", "page_segment", "metadata_enrich",
         "chunk_text"
     )
+
+    # Sincronizar metadata en filas ya embebidas sin forzar recomputo de vectores
+    sync_metadata_enrich_from_gold(args.embeddings_table, gold)
 
     base = normalize_embed_text(base)
 

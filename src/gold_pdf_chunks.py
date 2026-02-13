@@ -62,6 +62,9 @@ def ensure_gold_table(gold_table: str):
           -- Segmento de negocio
           page_segment STRING,
 
+          -- Metadata estructurada (JSON)
+          metadata_enrich STRING,
+
           -- Tipo: 'text', 'table', 'figure_enriched'
           chunk_type STRING,
 
@@ -92,6 +95,8 @@ def ensure_gold_table(gold_table: str):
         to_add.append("topic_content STRING")
     if "page_segment" not in existing_cols:
         to_add.append("page_segment STRING")
+    if "metadata_enrich" not in existing_cols:
+        to_add.append("metadata_enrich STRING")
     if to_add:
         spark.sql(f"ALTER TABLE {gold_table} ADD COLUMNS ({', '.join(to_add)})")
 
@@ -278,6 +283,7 @@ OUT_SCHEMA = T.StructType([
     T.StructField("topic_llm", T.StringType(), True),
     T.StructField("topic_content", T.StringType(), True),
     T.StructField("page_segment", T.StringType(), True),
+    T.StructField("metadata_enrich", T.StringType(), True),
 
     T.StructField("chunk_type", T.StringType(), True),
 
@@ -416,6 +422,8 @@ def make_chunks_map_in_pandas(chunk_size: int, overlap: int, min_chars: int):
                                     if isinstance(getattr(r, "topic_content", None), str) else None,
                                 "page_segment": r.page_segment
                                     if isinstance(getattr(r, "page_segment", None), str) else None,
+                                "metadata_enrich": r.metadata_enrich
+                                    if isinstance(getattr(r, "metadata_enrich", None), str) else None,
 
                                 "chunk_type": "table",
                                 "page_figures_enriched_text": None,
@@ -461,6 +469,8 @@ def make_chunks_map_in_pandas(chunk_size: int, overlap: int, min_chars: int):
                             if isinstance(getattr(r, "topic_content", None), str) else None,
                         "page_segment": r.page_segment
                             if isinstance(getattr(r, "page_segment", None), str) else None,
+                        "metadata_enrich": r.metadata_enrich
+                            if isinstance(getattr(r, "metadata_enrich", None), str) else None,
                         "chunk_type": chunk_type,
                         "page_figures_enriched_text": r.page_figures_enriched_text
                             if isinstance(getattr(r, "page_figures_enriched_text", None), str) else None,
@@ -553,6 +563,11 @@ def main():
         select_cols.append(F.col("page_segment").cast("string").alias("page_segment"))
     else:
         select_cols.append(F.lit(None).cast("string").alias("page_segment"))
+
+    if "metadata_enrich" in available_cols:
+        select_cols.append(F.col("metadata_enrich").cast("string").alias("metadata_enrich"))
+    else:
+        select_cols.append(F.lit(None).cast("string").alias("metadata_enrich"))
     
     silver_base = silver_df.select(*select_cols)
 
@@ -592,10 +607,11 @@ def main():
             F.sha2(
                 F.concat_ws(
                     "||",
-                    F.lit("v7"),  # Incrementar versión por agregar page_segment
+                    F.lit("v8"),  # Incrementar versión por agregar metadata_enrich
                     F.col("chunk_type"),
                     F.coalesce(F.col("content_text"), F.lit("")),
                     F.coalesce(F.col("page_text"), F.lit("")),
+                    F.coalesce(F.col("metadata_enrich"), F.lit("")),
                 ),
                 256,
             ),
@@ -635,7 +651,7 @@ def main():
             "page_id", "page_num", "chunk_type", "content_text",
             "page_text",
             "page_figures_enriched_text", "page_hash",
-            "topic_heuristic", "topic_llm", "topic_content", "page_segment",
+            "topic_heuristic", "topic_llm", "topic_content", "page_segment", "metadata_enrich",
         )
         .mapInPandas(chunker, schema=OUT_SCHEMA)
         .withColumn(
@@ -677,6 +693,7 @@ def main():
       t.topic_llm = s.topic_llm,
       t.topic_content = s.topic_content,
       t.page_segment = s.page_segment,
+      t.metadata_enrich = s.metadata_enrich,
       t.chunk_type = s.chunk_type,
       t.page_figures_enriched_text = s.page_figures_enriched_text,
       t.page_hash = s.page_hash,
@@ -688,7 +705,7 @@ def main():
       doc_id, path, modificationTime,
       file_date, file_type,
       page_id, page_num, page_label, page_text,
-      topic_heuristic, topic_llm, topic_content, page_segment,
+      topic_heuristic, topic_llm, topic_content, page_segment, metadata_enrich,
       chunk_type,
       page_figures_enriched_text,
       page_hash,
@@ -698,7 +715,7 @@ def main():
       s.doc_id, s.path, s.modificationTime,
       s.file_date, s.file_type,
       s.page_id, s.page_num, s.page_label, s.page_text,
-      s.topic_heuristic, s.topic_llm, s.topic_content, s.page_segment,
+      s.topic_heuristic, s.topic_llm, s.topic_content, s.page_segment, s.metadata_enrich,
       s.chunk_type,
       s.page_figures_enriched_text,
       s.page_hash,
