@@ -75,7 +75,8 @@ variables:
   
   enrich_model:
     description: "Nombre del endpoint LLM para analizar gráficos en las páginas"
-    default: "databricks-gemma-3-12b"
+    # default: "databricks-gemma-3-12b"
+    default: "databricks-llama-4-maverick"
 
   # Variables para enriquecimiento con topic heurístico
   do_enrich_topic:
@@ -83,8 +84,9 @@ variables:
     default: "true"
   
   topic_model:
-    description: "Nombre del endpoint LLM para generar topics de cada página"
-    default: "databricks-gemma-3-12b"
+    description: "Nombre del endpoint LLM para generar el campo topic_llm de cada página"
+    # default: "databricks-gemma-3-12b"
+    default: "databricks-llama-4-maverick"
   
   topic_min_chars:
     description: "Mínimo de caracteres de page_text requeridos para generar el topic"
@@ -97,7 +99,8 @@ variables:
   
   topic_content_model:
     description: "Nombre del endpoint LLM para generar topic_content de cada página"
-    default: "databricks-gemma-3-12b"
+    # default: "databricks-gemma-3-12b"
+    default: "databricks-llama-4-maverick"
   
   topic_content_min_chars:
     description: "Mínimo de caracteres de page_text requeridos para generar topic_content"

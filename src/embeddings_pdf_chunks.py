@@ -100,14 +100,47 @@ def ensure_cdf_enabled(emb_table: str) -> None:
             spark.sql(f"ALTER TABLE {emb_table} ADD COLUMNS ({col_name} {col_type})")
 
 
+# def normalize_embed_text(df: DataFrame) -> DataFrame:
+#     cleaned = F.regexp_replace(
+#         F.col("chunk_text"),
+#         r"(?s)^\[SOURCE:[^\]]*\]\s*\n\[TOPIC:[^\]]*\]\s*\n\s*",
+#         "",
+#     )
+#     return (
+#         df.withColumn("embed_text", F.trim(cleaned))
+#           .withColumn("chunk_char_len", F.length(F.col("embed_text")).cast("int"))
+#           .withColumn("chunk_hash", F.sha2(F.coalesce(F.col("embed_text"), F.lit("")), 256))
+#           .where(F.length(F.col("embed_text")) > 0)
+#     )
+
 def normalize_embed_text(df: DataFrame) -> DataFrame:
     cleaned = F.regexp_replace(
         F.col("chunk_text"),
         r"(?s)^\[SOURCE:[^\]]*\]\s*\n\[TOPIC:[^\]]*\]\s*\n\s*",
         "",
     )
+    cleaned = F.trim(cleaned)
+
+    # Combinar los 3 campos de topic, separados por " | ", omitiendo nulos/vacíos
+    topics = F.array_join(
+        F.array_remove(
+            F.array(
+                F.nullif(F.trim(F.coalesce(F.col("topic_heuristic"), F.lit(""))), F.lit("")),
+                F.nullif(F.trim(F.coalesce(F.col("topic_llm"),       F.lit(""))), F.lit("")),
+                F.nullif(F.trim(F.coalesce(F.col("topic_content"),   F.lit(""))), F.lit("")),
+            ),
+            ""  # remove empty strings
+        ),
+        " | "
+    )
+
+    embed = F.when(
+        F.length(topics) > 0,
+        F.concat(F.lit("[TOPIC: "), topics, F.lit("]\n"), cleaned)
+    ).otherwise(cleaned)
+
     return (
-        df.withColumn("embed_text", F.trim(cleaned))
+        df.withColumn("embed_text", embed)
           .withColumn("chunk_char_len", F.length(F.col("embed_text")).cast("int"))
           .withColumn("chunk_hash", F.sha2(F.coalesce(F.col("embed_text"), F.lit("")), 256))
           .where(F.length(F.col("embed_text")) > 0)

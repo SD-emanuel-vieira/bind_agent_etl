@@ -32,6 +32,105 @@ def normalize_path_col(col):
     return normalized
 
 
+def detect_specific_topic(content_col):
+    """
+    Función que aplica lógica determinística para detectar tópicos específicos.
+    
+    Retorna un topic específico si detecta patrones conocidos, o NULL si debe
+    pasar por análisis LLM normal.
+    
+    CASOS ESPECÍFICOS:
+    1. P&L por Segmento Operativo: "Banca Comercial" O "Tesorería" → "P&L BIND por segmento"
+    2. P&L por Línea de Negocio: Detecta Corporate, Empresas, Minorista, Institucional, BaaS
+       - Si encuentra UNA sola línea de negocio → "P&L [Línea]" (ej: "P&L Corporate")
+       - Si encuentra MÚLTIPLES líneas → "P&L BIND General"
+    3. P&L General: Estructura ingresos/gastos sin segmentos específicos → "P&L BIND General"
+    """
+    content_lower = F.lower(content_col)
+    
+    # Detectar P&L
+    has_pl = (
+        content_lower.contains("p&l") | 
+        content_lower.contains("p & l") |
+        (content_lower.contains("ingreso") & content_lower.contains("gasto"))
+    )
+    
+    # Detectar segmentos OPERATIVOS de BIND (estos tienen prioridad)
+    has_banca_comercial = content_lower.contains("banca comercial") | content_lower.contains("banco comercial")
+    has_tesoreria = content_lower.contains("tesorería") | content_lower.contains("tesoreria")
+    has_operational_segments = has_banca_comercial | has_tesoreria
+    
+    # Detectar LÍNEAS DE NEGOCIO específicas
+    has_corporate = content_lower.contains("corporate")
+    has_empresas = content_lower.contains("empresas")
+    has_minorista = content_lower.contains("minorista")
+    has_institucional = content_lower.contains("institucional")
+    has_baas = content_lower.contains("baas")
+    
+    # Contar cuántas líneas de negocio están presentes
+    business_lines_count = (
+        F.when(has_corporate, 1).otherwise(0) +
+        F.when(has_empresas, 1).otherwise(0) +
+        F.when(has_minorista, 1).otherwise(0) +
+        F.when(has_institucional, 1).otherwise(0) +
+        F.when(has_baas, 1).otherwise(0)
+    )
+    
+    has_single_business_line = business_lines_count == 1
+    has_multiple_business_lines = business_lines_count > 1
+    
+    # Detectar estructura general (ingresos/gastos)
+    has_ingresos = content_lower.contains("ingreso")
+    has_gastos = content_lower.contains("gasto")
+    has_general_structure = has_ingresos & has_gastos
+    
+    # LÓGICA DE DECISIÓN (en orden de prioridad):
+    # 1. P&L con segmentos OPERATIVOS (Banca Comercial/Tesorería) → siempre "P&L por segmento"
+    # 2. P&L con UNA línea de negocio específica → "P&L [Línea]"
+    # 3. P&L con MÚLTIPLES líneas de negocio → "P&L BIND General"
+    # 4. P&L con estructura general sin especificaciones → "P&L BIND General"
+    # 5. No coincide con patrones → NULL (pasar por LLM)
+    
+    return (
+        F.when(
+            has_pl & has_operational_segments,
+            F.lit("P&L BIND por segmento")
+        )
+        # Casos de línea de negocio específica (una sola)
+        .when(
+            has_pl & has_single_business_line & has_corporate,
+            F.lit("P&L Corporate")
+        )
+        .when(
+            has_pl & has_single_business_line & has_empresas,
+            F.lit("P&L Empresas")
+        )
+        .when(
+            has_pl & has_single_business_line & has_minorista,
+            F.lit("P&L Minorista")
+        )
+        .when(
+            has_pl & has_single_business_line & has_institucional,
+            F.lit("P&L Institucional")
+        )
+        .when(
+            has_pl & has_single_business_line & has_baas,
+            F.lit("P&L BaaS")
+        )
+        # Múltiples líneas de negocio → General
+        .when(
+            has_pl & has_multiple_business_lines,
+            F.lit("P&L BIND General")
+        )
+        # P&L genérico sin especificaciones
+        .when(
+            has_pl & has_general_structure,
+            F.lit("P&L BIND General")
+        )
+        .otherwise(F.lit(None).cast("string"))
+    )
+
+
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--silver_table", required=True)
@@ -77,6 +176,8 @@ def enrich_topic_llm(silver_table: str, image_output_path: str, topic_model: str
     """
     Genera topic_llm analizando la IMAGEN de la página.
     Requiere que las imágenes estén disponibles.
+    
+    MEJORA: Aplica lógica determinística primero para casos específicos.
     """
     print(f"[enrich_topic_llm] Buscando páginas con >= {min_chars} chars sin topic_llm...")
     
@@ -93,14 +194,14 @@ def enrich_topic_llm(silver_table: str, image_output_path: str, topic_model: str
         )
     )
     
-    # Leer páginas candidatas desde Silver (que aún no tienen topic_llm)
-    # Solo páginas CON texto suficiente (>= min_chars)
+    # Leer páginas candidatas desde Silver
     candidates = (
         spark.table(silver_table)
         .filter(F.col("topic_llm").isNull())
         .filter(F.col("page_image_uri").isNotNull())
         .filter(text_ok | no_text_but_other_ok)
-        .select("doc_id", "modificationTime", "page_id", "page_image_uri")
+        .select("doc_id", "modificationTime", "page_id", "page_image_uri", 
+                "page_text", "page_table_text")
         .withColumn("image_path_normalized", normalize_path_col(F.col("page_image_uri")))
     )
     
@@ -111,18 +212,76 @@ def enrich_topic_llm(silver_table: str, image_output_path: str, topic_model: str
     
     print(f"[enrich_topic_llm] Encontradas {cand_count} páginas para procesar.")
     
+    # PASO 1: Aplicar lógica determinística
+    # Combinar texto disponible para análisis
+    combined_text = F.concat_ws("\n", 
+        F.coalesce(F.col("page_text"), F.lit("")),
+        F.coalesce(F.col("page_table_text"), F.lit(""))
+    )
+    
+    candidates_with_detection = (
+        candidates
+        .withColumn("combined_text_for_detection", combined_text)
+        .withColumn("detected_topic", detect_specific_topic(F.col("combined_text_for_detection")))
+    )
+    
+    # Separar en dos grupos: páginas con topic detectado y páginas que necesitan LLM
+    pages_with_detected_topic = candidates_with_detection.filter(F.col("detected_topic").isNotNull())
+    pages_needing_llm = candidates_with_detection.filter(F.col("detected_topic").isNull())
+    
+    detected_count = pages_with_detected_topic.count()
+    llm_count = pages_needing_llm.count()
+    
+    print(f"[enrich_topic_llm] {detected_count} páginas con topic detectado automáticamente.")
+    print(f"[enrich_topic_llm] {llm_count} páginas requieren análisis LLM.")
+    
+    # PASO 2: Procesar páginas con topic detectado (sin LLM)
+    if detected_count > 0:
+        detected_updates = (
+            pages_with_detected_topic
+            .select(
+                "doc_id", "modificationTime", "page_id",
+                F.col("detected_topic").alias("topic_llm"),
+                F.lit(None).cast("string").alias("topic_llm_error"),
+                F.current_timestamp().alias("topic_llm_ts"),
+                F.lit("deterministic_rule").alias("topic_llm_model")
+            )
+        )
+        
+        detected_updates.createOrReplaceTempView("topic_detected_updates")
+        
+        spark.sql(f"""
+        MERGE INTO {silver_table} AS t
+        USING topic_detected_updates AS s
+        ON t.doc_id = s.doc_id 
+           AND t.modificationTime = s.modificationTime 
+           AND t.page_id = s.page_id
+        WHEN MATCHED THEN UPDATE SET
+            t.topic_llm = s.topic_llm,
+            t.topic_llm_error = s.topic_llm_error,
+            t.topic_llm_ts = s.topic_llm_ts,
+            t.topic_llm_model = s.topic_llm_model
+        """)
+        
+        print(f"[enrich_topic_llm] Actualizado {detected_count} páginas con topic detectado.")
+    
+    # PASO 3: Procesar páginas restantes con LLM
+    if llm_count == 0:
+        print("[enrich_topic_llm] No hay páginas que requieran análisis LLM.")
+        return
+    
     # Cargar imágenes
     imgs = load_images_df(image_output_path)
     
     # Debug: mostrar ejemplos de paths
     print("[enrich_topic_llm] Ejemplo de paths en candidatos:")
-    candidates.select("image_path_normalized").show(3, truncate=False)
+    pages_needing_llm.select("image_path_normalized").show(3, truncate=False)
     print("[enrich_topic_llm] Ejemplo de paths en imágenes:")
     imgs.select("image_path_normalized").show(3, truncate=False)
     
     # Join con imágenes
     cand_with_img = (
-        candidates
+        pages_needing_llm
         .join(imgs, on="image_path_normalized", how="inner")
     )
     
@@ -133,11 +292,11 @@ def enrich_topic_llm(silver_table: str, image_output_path: str, topic_model: str
     
     print(f"[enrich_topic_llm] {matched_count} páginas con imagen encontrada. Invocando LLM...")
     
-    # Prompt
+    # Prompt simplificado (sin reglas complejas, ya las manejamos antes)
     topic_prompt = F.lit(
         "Analiza la imagen adjunta (una página de un documento PDF).\n"
         "Tu tarea es identificar el TÓPICO o TEMA principal de esta página.\n\n"
-        "REGLAS ESTRICTAS:\n"
+        "REGLAS:\n"
         "1. Responde ÚNICAMENTE con el tópico, SIN explicaciones adicionales.\n"
         "2. Máximo 10 palabras.\n"
         "3. Sé específico pero conciso (ej: 'Gráfico de ventas Q3 2024', 'Organigrama departamento TI').\n"
@@ -198,28 +357,29 @@ def enrich_topic_llm(silver_table: str, image_output_path: str, topic_model: str
         t.topic_llm_model = s.topic_llm_model
     """)
     
-    print(f"[enrich_topic_llm] Actualizado topic_llm para {matched_count} páginas.")
+    print(f"[enrich_topic_llm] Actualizado topic_llm para {matched_count} páginas vía LLM.")
+    print(f"[enrich_topic_llm] Total procesado: {detected_count + matched_count} páginas.")
 
 
 def enrich_topic_content(silver_table: str, topic_content_model: str, min_chars: int):
     """
     Genera topic_content analizando el TEXTO de la página (page_text + page_table_text).
     NO requiere imágenes, solo contenido textual.
+    
+    MEJORA: Aplica lógica determinística primero para casos específicos.
     """
     print(f"[enrich_topic_content] Buscando páginas con contenido textual >= {min_chars} chars sin topic_content...")
     
     # Leer páginas candidatas
-    # Concatenar page_text y page_table_text para evaluar contenido total
     silver_df = spark.table(silver_table)
     
-    # Verificar si la columna topic_content existe, si no, todas las filas son candidatas
+    # Verificar si la columna topic_content existe
     if "topic_content" not in silver_df.columns:
         print("[enrich_topic_content] Columna topic_content no existe, se procesarán todas las páginas con contenido.")
         has_topic_content = F.lit(False)
     else:
         has_topic_content = F.col("topic_content").isNotNull()
     
-    # Verificar si page_table_text existe
     # Construir contenido combinado con todos los campos disponibles
     parts = [F.coalesce(F.col("page_text"), F.lit(""))]
 
@@ -250,21 +410,73 @@ def enrich_topic_content(silver_table: str, topic_content_model: str, min_chars:
         print("[enrich_topic_content] No hay páginas candidatas para enrichment.")
         return
     
-    print(f"[enrich_topic_content] Encontradas {cand_count} páginas para procesar. Invocando LLM...")
+    print(f"[enrich_topic_content] Encontradas {cand_count} páginas para procesar.")
     
-    # Prompt para análisis de texto
-    # Truncamos el contenido a ~4000 chars para no exceder límites del modelo
+    # PASO 1: Aplicar lógica determinística
+    candidates_with_detection = (
+        candidates
+        .withColumn("detected_topic", detect_specific_topic(F.col("combined_content")))
+    )
+    
+    # Separar en dos grupos
+    pages_with_detected_topic = candidates_with_detection.filter(F.col("detected_topic").isNotNull())
+    pages_needing_llm = candidates_with_detection.filter(F.col("detected_topic").isNull())
+    
+    detected_count = pages_with_detected_topic.count()
+    llm_count = pages_needing_llm.count()
+    
+    print(f"[enrich_topic_content] {detected_count} páginas con topic detectado automáticamente.")
+    print(f"[enrich_topic_content] {llm_count} páginas requieren análisis LLM.")
+    
+    # PASO 2: Procesar páginas con topic detectado (sin LLM)
+    if detected_count > 0:
+        detected_updates = (
+            pages_with_detected_topic
+            .select(
+                "doc_id", "modificationTime", "page_id",
+                F.col("detected_topic").alias("topic_content"),
+                F.lit(None).cast("string").alias("topic_content_error"),
+                F.current_timestamp().alias("topic_content_ts"),
+                F.lit("deterministic_rule").alias("topic_content_model")
+            )
+        )
+        
+        detected_updates.createOrReplaceTempView("topic_content_detected_updates")
+        
+        spark.sql(f"""
+        MERGE INTO {silver_table} AS t
+        USING topic_content_detected_updates AS s
+        ON t.doc_id = s.doc_id 
+           AND t.modificationTime = s.modificationTime 
+           AND t.page_id = s.page_id
+        WHEN MATCHED THEN UPDATE SET
+            t.topic_content = s.topic_content,
+            t.topic_content_error = s.topic_content_error,
+            t.topic_content_ts = s.topic_content_ts,
+            t.topic_content_model = s.topic_content_model
+        """)
+        
+        print(f"[enrich_topic_content] Actualizado {detected_count} páginas con topic detectado.")
+    
+    # PASO 3: Procesar páginas restantes con LLM
+    if llm_count == 0:
+        print("[enrich_topic_content] No hay páginas que requieran análisis LLM.")
+        return
+    
+    print(f"[enrich_topic_content] Procesando {llm_count} páginas con LLM...")
+    
+    # Prompt simplificado para análisis de texto
     topic_prompt = F.concat(
         F.lit(
             "Analiza el siguiente contenido de una página de documento PDF.\n"
             "Tu tarea es identificar el TÓPICO o TEMA principal de esta página.\n\n"
-            "REGLAS ESTRICTAS:\n"
+            "REGLAS:\n"
             "1. Responde ÚNICAMENTE con el tópico, SIN explicaciones adicionales.\n"
-            "2. Máximo 8 palabras.\n"
-            "3. Sé específico pero conciso (ej: 'Resultados financieros Q3 2024', 'Estructura organizacional', 'Tabla de indicadores operativos').\n"
+            "2. Máximo 10 palabras.\n"
+            "3. Sé específico pero conciso (ej: 'Resultados financieros Q3 2024', 'Estructura organizacional').\n"
             "4. Si hay tablas, menciona el tipo de datos que contienen.\n"
             "5. Si cualquiera de las palabras 'Empresas', 'Corporate', 'Institucional', 'Minorista' o 'BaaS' aparece,"
-            "debe estar en el tópico también (ej: P&L Empresas). Si aparece más de una de estas palabras debe decir en el tópico 'General'.\n"
+            "debe estar en el tópico también (ej: 'P&L Empresas', 'Volumen BaaS'). Si aparece más de una debe decir 'General'.\n"
             "6. Responde en español.\n\n"
             "CONTENIDO DE LA PÁGINA:\n"
         ),
@@ -273,7 +485,7 @@ def enrich_topic_content(silver_table: str, topic_content_model: str, min_chars:
     )
     
     enriched = (
-        candidates
+        pages_needing_llm
         .withColumn("topic_prompt", topic_prompt)
         .withColumn(
             "topic_out",
@@ -306,11 +518,11 @@ def enrich_topic_content(silver_table: str, topic_content_model: str, min_chars:
     )
     
     # Crear temp view y hacer MERGE
-    enriched.createOrReplaceTempView("topic_content_updates")
+    enriched.createOrReplaceTempView("topic_content_enriched_updates")
     
     spark.sql(f"""
     MERGE INTO {silver_table} AS t
-    USING topic_content_updates AS s
+    USING topic_content_enriched_updates AS s
     ON t.doc_id = s.doc_id 
        AND t.modificationTime = s.modificationTime 
        AND t.page_id = s.page_id
@@ -321,14 +533,14 @@ def enrich_topic_content(silver_table: str, topic_content_model: str, min_chars:
         t.topic_content_model = s.topic_content_model
     """)
     
-    print(f"[enrich_topic_content] Actualizado topic_content para {cand_count} páginas.")
+    print(f"[enrich_topic_content] Actualizado topic_content para {llm_count} páginas vía LLM.")
+    print(f"[enrich_topic_content] Total procesado: {detected_count + llm_count} páginas.")
 
 
 def enrich_metadata(silver_table: str, metadata_model: str, min_chars: int):
     """
-    Extrae metadatos estructurados del contenido (page_text + page_table_text) usando LLM.
-    Genera un JSON con: keywords, data_period, content_category, table_metrics, entities.
-    NO requiere imágenes.
+    Genera metadata_enrich: JSON con keywords, período, categoría, métricas, entidades.
+    NO requiere imágenes, solo contenido textual.
     """
     print(f"[enrich_metadata] Buscando páginas con contenido >= {min_chars} chars sin metadata_enrich...")
     
@@ -341,26 +553,27 @@ def enrich_metadata(silver_table: str, metadata_model: str, min_chars: int):
     else:
         has_metadata = F.col("metadata_enrich").isNotNull()
     
-    # Verificar si page_table_text existe
-    # Construir contenido combinado con todos los campos disponibles
+    # Construir contenido combinado
     parts = [F.coalesce(F.col("page_text"), F.lit(""))]
-
+    
     if "page_table_text" in silver_df.columns:
         parts.append(F.coalesce(F.col("page_table_text"), F.lit("")))
+        
+    if "page_figures_text" in silver_df.columns:
+        parts.append(F.coalesce(F.col("page_figures_text"), F.lit("")))
 
     if "page_figures_enriched_text" in silver_df.columns:
         parts.append(F.coalesce(F.col("page_figures_enriched_text"), F.lit("")))
 
     combined_content = F.concat_ws("\n\n---\n\n", *parts)
-    
     content_length = F.length(F.trim(combined_content))
     
     candidates = (
         silver_df
         .withColumn("combined_content", combined_content)
         .withColumn("content_length", content_length)
-        .filter(~has_metadata)  # Sin metadata_enrich
-        .filter(F.col("content_length") >= min_chars)  # Con contenido suficiente
+        .filter(~has_metadata)
+        .filter(F.col("content_length") >= min_chars)
         .select("doc_id", "modificationTime", "page_id", "combined_content")
     )
     
@@ -371,27 +584,26 @@ def enrich_metadata(silver_table: str, metadata_model: str, min_chars: int):
     
     print(f"[enrich_metadata] Encontradas {cand_count} páginas para procesar. Invocando LLM...")
     
-    # Prompt para extraer metadatos estructurados
+    # Prompt para metadata
     metadata_prompt = F.concat(
         F.lit(
-            "Analiza el siguiente contenido de una página de documento y extrae metadatos estructurados.\n\n"
-            "RESPONDE ÚNICAMENTE con un objeto JSON válido (sin explicaciones ni texto adicional) con estos campos:\n"
+            "Analiza el siguiente contenido de una página de documento PDF.\n"
+            "Extrae metadatos estructurados en formato JSON.\n\n"
+            "ESTRUCTURA JSON REQUERIDA:\n"
             "{\n"
-            '  "keywords": ["palabra1", "palabra2", ...],\n'
-            '  "data_period": "Q3 2024" o "Oct 2024" o "2024" o null,\n'
-            '  "content_category": "financiero" o "operativo" o "estrategico" o "legal" o "otro",\n'
-            '  "table_metrics": ["metrica1", "metrica2", ...] o [],\n'
-            '  "entities": ["entidad1", "entidad2", ...] o []\n'
+            '  "keywords": ["keyword1", "keyword2", ...],  // 3-7 palabras clave relevantes\n'
+            '  "periodo": "Q3 2024" o "Anual 2023" o null,  // Si aplica\n'
+            '  "categoria": "Finanzas" o "Operaciones" o "Legal" etc,\n'
+            '  "metricas": ["métrica1", "métrica2"],  // Si hay KPIs, números relevantes\n'
+            '  "entidades": ["empresa1", "persona1"]  // Organizaciones, personas mencionadas\n'
             "}\n\n"
-            "INSTRUCCIONES:\n"
-            "- keywords: 5-10 términos clave relevantes del contenido (sustantivos, métricas, conceptos importantes)\n"
-            "- data_period: período temporal de los datos si se menciona (trimestre, mes, año). null si no hay.\n"
-            "- content_category: categoría principal del contenido\n"
-            "- table_metrics: si hay tablas, lista las métricas/indicadores mencionados (ej: 'Ingresos', 'EBITDA', 'Margen bruto')\n"
-            "- entities: empresas, organizaciones, países, monedas mencionadas\n\n"
-            "CONTENIDO:\n"
+            "REGLAS:\n"
+            "1. Responde SOLO con el JSON válido, sin markdown ni explicaciones.\n"
+            "2. Usa valores null si no aplica.\n"
+            "3. Responde en español.\n\n"
+            "CONTENIDO DE LA PÁGINA:\n"
         ),
-        F.substring(F.col("combined_content"), 1, 3500),  # Truncar para dejar espacio al prompt
+        F.substring(F.col("combined_content"), 1, 4000),
         F.lit("\n\nJSON:")
     )
     
