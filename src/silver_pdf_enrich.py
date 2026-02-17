@@ -24,19 +24,64 @@ from pyspark.sql.functions import expr
 # 2. El contexto se agregará ANTES del texto original del chunk
 # 3. Esto mejora el retrieval vectorial para queries relacionadas
 TOPIC_CONTEXT_MAP = {
+    "Ingresos por segmento": (
+        "Se muestran los resultados contables de cada banco de Argentina para julio 2025, "
+        "y para el caso de BIND Banco Industrial, la imagen ademas muestra el resultado de gestión. "
+        "Este resultado al mismo tiempo da un ordenamiento o relevancia a cada banco para ese periodo en particular."
+    ),
+    "Resultados integrales YTD": (
+        "Se muestra un resumen de los ingresos de 3 bancas o segmentos en particular: Empresas, Corporate e Institucional y sus respectivas variaciones sobre el mes anterior, es decir septiembre."
+        "Para cada banca, se presenta el valor total de ingresos en millones de pesos y la variación mensual. "
+        "Adicionalmente, se detalla ese ingreso en monto y variación mensual para diferentes conceptos como préstamos, comisiones, pasivos, afip, ajuste weiber, NDF+FX (instrumento derivado financiero) y previsiones (en este último se dan ejemplos de clientes)"
+        "Estos números corresponden a los detallados en el P&L de cada banca, aunque se encuentran redondeados para mostrar los millones en una manera más sencilla."
+    ),
     "P&L BIND por segmento": (
         "Esta tabla muestra el Resultado de gestión neto AxI por Banca Comercial "
         "(Corporate, Empresas, Institucional, Minorista, BaaS) y Tesorería"
     ),
+    "P&L BIND General": (
+        "El cuadro refleja los ingresos, egresos y resultados, por cada concepto (Margen Financiero de préstamos, "
+        "Margen Financiero de depósitos, FX & Trading, Comisiones Netas, Previsiones, Gastos directos e indirectos), "
+        "para cada trimestre del año, así como para los últimos meses y su acumulado anual. Adicionalmente, "
+        "las columnas ubicadas a la derecha de la columna 2025 YTD muestran información presupuestada o del budget (columnas: 2025 YTD y 2025 B). "
+        "Además a su derecha se encuentran dos columnas que representan la variación en monto y porcentual de lo real versus el budget. "
+    ),
+    
     # Agregar futuros contextos aquí siguiendo el mismo patrón:
     # "Evolución MF": "Esta gráfica muestra la evolución temporal del margen financiero...",
     # "Balance General": "Esta tabla presenta el balance general consolidado...",
+}
+
+# Patrón regex para meses en español (usado en detección dinámica de tópicos)
+SPANISH_MONTHS_PATTERN = (
+    "enero|febrero|marzo|abril|mayo|junio|julio|agosto|"
+    "septiembre|octubre|noviembre|diciembre"
+)
+
+# Contextos para tópicos DINÁMICOS (match por prefijo, no por clave exacta)
+# Se usa cuando el topic name incluye mes/año variable.
+TOPIC_CONTEXT_PREFIX_MAP = {
+    "Ingresos por segmento": (
+        "Esta tabla muestra los ingresos de BIND desglosados por segmento de negocio "
+        "(Empresas, Corporate, Institucional), comparando el mes actual contra el mes anterior. "
+        "Incluye métricas como Préstamos + Avales, Comisiones, Pasivos, Ajuste Waiver, AFIP, "
+        "NDF + FX y Previsiones, con variaciones en monto (MM) y porcentaje para cada segmento."
+    ),
+    "Resultados integrales YTD": (
+        "Esta tabla muestra el ranking de bancos del sistema financiero argentino según sus "
+        "Resultados Integrales acumulados en el año (YTD). Presenta el resultado neto de cada "
+        "entidad financiera ordenado de mayor a menor. BIND Banco Industrial aparece en el ranking."
+    ),
 }
 
 
 def get_context_for_topic(topic):
     """
     Retorna el contexto correspondiente a un topic si existe.
+    
+    Busca primero por coincidencia exacta en TOPIC_CONTEXT_MAP,
+    luego por coincidencia de prefijo en TOPIC_CONTEXT_PREFIX_MAP
+    (para tópicos dinámicos que incluyen mes/año variable).
     
     Args:
         topic: String del topic detectado (topic_llm o topic_content)
@@ -46,7 +91,15 @@ def get_context_for_topic(topic):
     """
     if not topic:
         return None
-    return TOPIC_CONTEXT_MAP.get(topic)
+    # 1. Coincidencia exacta
+    exact = TOPIC_CONTEXT_MAP.get(topic)
+    if exact:
+        return exact
+    # 2. Coincidencia por prefijo (tópicos dinámicos)
+    for prefix, context in TOPIC_CONTEXT_PREFIX_MAP.items():
+        if topic.startswith(prefix):
+            return context
+    return None
 
 
 def str2bool(v):
@@ -74,14 +127,112 @@ def detect_specific_topic(content_col):
     pasar por análisis LLM normal.
     
     CASOS ESPECÍFICOS:
-    1. P&L por Segmento Operativo: "Banca Comercial" O "Tesorería" → "P&L BIND por segmento"
-    2. P&L por Línea de Negocio: Detecta Corporate, Empresas, Minorista, Institucional, BaaS
+    1. Ingresos por Segmento: Empresas + Corporate + Institucional con Comisiones, Pasivos, 
+       Previsiones → "Ingresos por segmento {mes} {año} vs {mes_anterior}" (dinámico)
+    2. Resultados Integrales YTD: Ranking de bancos del sistema financiero
+       → "Resultados integrales YTD {mes} {año}" (dinámico)
+    3. P&L por Segmento Operativo: "Banca Comercial" O "Tesorería" → "P&L BIND por segmento"
+    4. P&L por Línea de Negocio: Detecta Corporate, Empresas, Minorista, Institucional, BaaS
        - Si encuentra UNA sola línea de negocio → "P&L [Línea]" (ej: "P&L Corporate")
        - Si encuentra MÚLTIPLES líneas → "P&L BIND General"
-    3. P&L General: Estructura ingresos/gastos sin segmentos específicos → "P&L BIND General"
+    5. P&L General: Estructura ingresos/gastos sin segmentos específicos → "P&L BIND General"
     """
     content_lower = F.lower(content_col)
     
+    # =========================================================================
+    # DETECCIÓN: Ingresos por Segmento (Imagen tipo "BIND | Ingresos oct 2025")
+    # =========================================================================
+    months_re = SPANISH_MONTHS_PATTERN
+    
+    # Indicadores de contenido: título con "ingresos" + mes + año
+    has_ingresos_title = content_lower.rlike(
+        r"ingresos\s+(" + months_re + r")\s+\d{4}"
+    )
+    
+    # Segmentos presentes simultáneamente (al menos 2 de los 3 principales)
+    has_corporate = content_lower.contains("corporate")
+    has_empresas = content_lower.contains("empresas")
+    has_institucional = content_lower.contains("institucional")
+    
+    segments_count_ingresos = (
+        F.when(has_corporate, 1).otherwise(0) +
+        F.when(has_empresas, 1).otherwise(0) +
+        F.when(has_institucional, 1).otherwise(0)
+    )
+    has_multiple_ingresos_segments = segments_count_ingresos >= 2
+    
+    # Ítems financieros típicos de esta slide
+    has_comisiones = content_lower.contains("comisiones")
+    has_pasivos = content_lower.contains("pasivos")
+    has_previsiones = content_lower.contains("previsiones")
+    has_revenue_items = has_comisiones & has_pasivos & has_previsiones
+    
+    is_ingresos_por_segmento = (
+        has_ingresos_title & has_multiple_ingresos_segments & has_revenue_items
+    )
+    
+    # Extraer mes, año y mes de comparación para topic dinámico
+    ingresos_month = F.regexp_extract(
+        content_lower, r"ingresos\s+(" + months_re + r")\s+\d{4}", 1
+    )
+    ingresos_year = F.regexp_extract(
+        content_lower, r"ingresos\s+(?:" + months_re + r")\s+(\d{4})", 1
+    )
+    ingresos_vs_month = F.regexp_extract(
+        content_lower, r"vs\s+(" + months_re + r")", 1
+    )
+    
+    ingresos_topic = F.concat(
+        F.lit("Ingresos por segmento "),
+        ingresos_month,
+        F.lit(" "),
+        ingresos_year,
+        F.when(
+            ingresos_vs_month != F.lit(""),
+            F.concat(F.lit(" vs "), ingresos_vs_month)
+        ).otherwise(F.lit(""))
+    )
+    
+    # =========================================================================
+    # DETECCIÓN: Resultados Integrales YTD (ranking de bancos)
+    # =========================================================================
+    has_resultados_integrales = content_lower.rlike(r"resultados\s+integrales")
+    has_ytd = content_lower.contains("ytd")
+    
+    # Nombres de bancos conocidos del sistema financiero argentino
+    has_bank_names = (
+        content_lower.contains("banco santander") |
+        content_lower.rlike(r"banco naci[oó]n") |
+        content_lower.contains("banco macro") |
+        content_lower.contains("bind banco industrial") |
+        content_lower.contains("banco provincia") |
+        content_lower.contains("banco patagonia") |
+        content_lower.contains("banco galicia")
+    )
+    
+    is_resultados_integrales = has_resultados_integrales & (has_ytd | has_bank_names)
+    
+    # Extraer mes y año del patrón "YTD {mes} {año}"
+    resultados_month = F.regexp_extract(
+        content_lower, r"ytd\s+(" + months_re + r")\s*\d{4}", 1
+    )
+    resultados_year = F.regexp_extract(
+        content_lower, r"ytd\s+(?:" + months_re + r")\s*(\d{4})", 1
+    )
+    
+    resultados_topic = F.when(
+        (resultados_month != F.lit("")) & (resultados_year != F.lit("")),
+        F.concat(
+            F.lit("Resultados integrales YTD "),
+            resultados_month,
+            F.lit(" "),
+            resultados_year
+        )
+    ).otherwise(F.lit("Resultados integrales YTD"))
+    
+    # =========================================================================
+    # DETECCIÓN: P&L (lógica existente)
+    # =========================================================================
     # Detectar P&L
     has_pl = (
         content_lower.contains("p&l") | 
@@ -95,10 +246,7 @@ def detect_specific_topic(content_col):
     has_operational_segments = has_banca_comercial | has_tesoreria
     
     # Detectar LÍNEAS DE NEGOCIO específicas
-    has_corporate = content_lower.contains("corporate")
-    has_empresas = content_lower.contains("empresas")
     has_minorista = content_lower.contains("minorista")
-    has_institucional = content_lower.contains("institucional")
     has_baas = content_lower.contains("baas")
     
     # Contar cuántas líneas de negocio están presentes
@@ -118,15 +266,29 @@ def detect_specific_topic(content_col):
     has_gastos = content_lower.contains("gasto")
     has_general_structure = has_ingresos & has_gastos
     
+    # =========================================================================
     # LÓGICA DE DECISIÓN (en orden de prioridad):
-    # 1. P&L con segmentos OPERATIVOS (Banca Comercial/Tesorería) → siempre "P&L por segmento"
-    # 2. P&L con UNA línea de negocio específica → "P&L [Línea]"
-    # 3. P&L con MÚLTIPLES líneas de negocio → "P&L BIND General"
-    # 4. P&L con estructura general sin especificaciones → "P&L BIND General"
-    # 5. No coincide con patrones → NULL (pasar por LLM)
+    # =========================================================================
+    # 1. Ingresos por segmento (dinámico) → prioridad alta, es muy específico
+    # 2. Resultados integrales YTD (dinámico) → prioridad alta
+    # 3. P&L con segmentos OPERATIVOS (Banca Comercial/Tesorería) → "P&L por segmento"
+    # 4. P&L con UNA línea de negocio específica → "P&L [Línea]"
+    # 5. P&L con MÚLTIPLES líneas de negocio → "P&L BIND General"
+    # 6. P&L con estructura general sin especificaciones → "P&L BIND General"
+    # 7. No coincide con patrones → NULL (pasar por LLM)
     
     return (
+        # --- Tópicos dinámicos (nuevos) ---
         F.when(
+            is_ingresos_por_segmento,
+            ingresos_topic
+        )
+        .when(
+            is_resultados_integrales,
+            resultados_topic
+        )
+        # --- P&L (existente) ---
+        .when(
             has_pl & has_operational_segments,
             F.lit("P&L BIND por segmento")
         )
