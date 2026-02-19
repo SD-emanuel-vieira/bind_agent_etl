@@ -11,7 +11,8 @@ variables:
   # Catálogo y Schema compartidos por ambos pipelines
   catalog:
     description: "Catálogo de Unity Catalog donde se crean todas las tablas"
-    default: bind_agent
+    # default: bind_agent
+    default: demo
   
   schema:
     description: "Schema dentro del catálogo para organizar las tablas de documentos"
@@ -21,6 +22,10 @@ variables:
   landing_volume:
     description: "Nombre del volumen donde llegan los archivos PDF"
     default: pdf
+
+  landing_volume_excel:
+    description: "Nombre del volumen donde llegan los archivos excel"
+    default: excel
   
   state_volume:
     description: "Nombre del volumen para almacenar estados de Auto Loader (checkpoints, schemas)"
@@ -143,7 +148,7 @@ variables:
   # -------------------------
   embeddings_table:
     description: "Nombre completo de la tabla donde se almacenan los chunks con sus embeddings"
-    default: "bind_agent.docs.pdf_chunks_embeddings"
+    default: "${var.catalog}.${var.schema}.pdf_chunks_embeddings"
 
   embedding_endpoint:
     description: "Nombre del serving endpoint que genera los vectores de embeddings"
@@ -242,6 +247,12 @@ resources:
       name: ${var.landing_volume}
       comment: "Landing: PDFs que disparan la ingesta"
 
+    excel_volume:
+      catalog_name: ${var.catalog}
+      schema_name: ${var.schema}
+      name: ${var.landing_volume_excel}
+      comment: "Landing: EXCELs que disparan la ingesta"
+
     docs_state_volume:
       catalog_name: ${var.catalog}
       schema_name: ${var.schema}
@@ -255,18 +266,10 @@ targets:
   dev:
     default: true
     workspace:
-      host: https://dbc-56f60291-144c.cloud.databricks.com
+      host: https://bind-dev.cloud.databricks.com
     variables:
-      catalog: bind_agent
-      schema: docs
-      landing_volume: pdf
-      state_volume: docs_state
-
-  prod:
-    workspace:
-      host: https://dbc-56f60291-144c.cloud.databricks.com
-    variables:
-      catalog: bind_agent
+      # catalog: bind_agent
+      catalog: demo
       schema: docs
       landing_volume: pdf
       state_volume: docs_state

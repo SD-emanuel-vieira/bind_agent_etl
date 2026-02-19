@@ -223,6 +223,7 @@ def wait_index_online(
         "ERROR",
         "OFFLINE",
         "DELETED",
+        "OFFLINE_FAILED",
     }
 
     while True:
@@ -233,8 +234,11 @@ def wait_index_online(
             print("[vector_search] Index ONLINE/READY (OK).")
             return
 
-        if state in FAIL_STATES:
-            raise RuntimeError(f"Index {index_full_name} en estado de error: {state}")
+        if state in FAIL_STATES or "FAIL" in state or "ERROR" in state:
+            desc = vsc.get_index(endpoint_name=endpoint_name, index_name=index_full_name).describe()
+            raise RuntimeError(
+                f"Index {index_full_name} en estado de error: {state}\nDescribe: {desc}"
+            )
 
         if time.time() - t0 > timeout_seconds:
             raise TimeoutError(
