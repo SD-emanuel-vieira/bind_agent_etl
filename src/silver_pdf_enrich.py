@@ -24,28 +24,48 @@ from pyspark.sql.functions import expr
 # 2. El contexto se agregará ANTES del texto original del chunk
 # 3. Esto mejora el retrieval vectorial para queries relacionadas
 TOPIC_CONTEXT_MAP = {
-    "Ingresos por segmento": (
+    "Resultados integrales YTD": (
         "Se muestran los resultados contables de cada banco de Argentina para julio 2025, "
         "y para el caso de BIND Banco Industrial, la imagen ademas muestra el resultado de gestión. "
         "Este resultado al mismo tiempo da un ordenamiento o relevancia a cada banco para ese periodo en particular."
     ),
-    "Resultados integrales YTD": (
+    "P&L BIND por segmento": (
+        "El cuadro refleja los ingresos, egresos y resultados, por cada banca, negocio o segmento (Empresas, Corporate, Institucional, Red Minorista, Digital (BaaS), Cuota a Cuota (CaC), Compra de Cartera (CdC), tesorería), para cada trimestre del año, así como para los últimos meses y su acumulado anual."
+        "Adicionalmente, las columnas ubicadas a la derecha de la columna 2025 YTD muestran información presupuestada o del budget (columnas: 2025 YTD y 2025 B). Sinónimos de presupuesto son: PEA, bdgt, bdg o budget."
+        "Además a su derecha se encuentran dos columnas que representan la variación en monto y porcentual de lo real versus el budget."
+        "Cuando las preguntas mencionan Resultado de Gestión por Negocio, se refieren a la linea 'Rdo. Comercial Gestión Neto AxI'."
+        "Xsell representa el resultado obtenido por los negocios en otros balances o books. Xsell incluye el resultado de BIND IVSA+IAM."
+        "Cuando se pregunte por tesorería, se debe tomar el valor del concepto que dice tesorería (nominal). SGR (nominal) es un subtotal que refleja el beneficio fiscal y el resultado obtenido por las inversiones realizadas en las diferentes SGR del sistema financiero."
+        "AxI (nominal) es un subtotal que repesenta el AxI que paga la tesorería y lo mismo sucede con el subtotal Impuesto (nominal) que es el impuesto pagado por la tesorería."
+    ),
+    "Ingresos por segmento": (
         "Se muestra un resumen de los ingresos de 3 bancas o segmentos en particular: Empresas, Corporate e Institucional y sus respectivas variaciones sobre el mes anterior, es decir septiembre."
         "Para cada banca, se presenta el valor total de ingresos en millones de pesos y la variación mensual. "
-        "Adicionalmente, se detalla ese ingreso en monto y variación mensual para diferentes conceptos como préstamos, comisiones, pasivos, afip, ajuste weiber, NDF+FX (instrumento derivado financiero) y previsiones (en este último se dan ejemplos de clientes)"
+        "Adicionalmente, se detalla ese ingreso en monto y variación mensual para diferentes conceptos como préstamos, comisiones, pasivos, afip, ajuste weiber, NDF+FX (instrumento derivado financiero) y previsiones (en este último se dan ejemplos de clientes)."
         "Estos números corresponden a los detallados en el P&L de cada banca, aunque se encuentran redondeados para mostrar los millones en una manera más sencilla."
     ),
-    "P&L BIND por segmento": (
-        "Esta tabla muestra el Resultado de gestión neto AxI por Banca Comercial "
-        "(Corporate, Empresas, Institucional, Minorista, BaaS) y Tesorería"
-    ),
     "P&L BIND General": (
-        "El cuadro refleja los ingresos, egresos y resultados, por cada concepto (Margen Financiero de préstamos, "
-        "Margen Financiero de depósitos, FX & Trading, Comisiones Netas, Previsiones, Gastos directos e indirectos), "
-        "para cada trimestre del año, así como para los últimos meses y su acumulado anual. Adicionalmente, "
-        "las columnas ubicadas a la derecha de la columna 2025 YTD muestran información presupuestada o del budget (columnas: 2025 YTD y 2025 B). "
-        "Además a su derecha se encuentran dos columnas que representan la variación en monto y porcentual de lo real versus el budget. "
+        "El cuadro refleja los ingresos, egresos y resultados, por cada concepto (Margen Financiero de préstamos, Margen Financiero de depósitos, FX & Trading, Comisiones Netas, Previsiones, Gastos directos e indirectos), para cada trimestre del año, así como para los últimos meses y su acumulado anual."
+        "Adicionalmente, las columnas ubicadas a la derecha de la columna 2025 YTD muestran información presupuestada o del budget (columnas: 2025 YTD y 2025 B). Sinónimos de presupuesto son: PEA, bdgt, bdg o budget."
+        "Además a su derecha se encuentran dos columnas que representan la variación en monto y porcentual de lo real versus el budget."
+        "MF Prestamos es el Margen Financiero de Prestamos O sea el resultado facturado menos el costo de fondeo."
+        "MF Depositos es el Margen Financiero de Depositos. O sea el resultado pagado al cliente por el deposito  neto del ingreso obtenido por el pago de la tasa de transferencia por la tesorería. Por eso da resultado positivo."
+        "FX & Trading incluyen los ingresos por operaciones de cambio o de moneda ademas de las operaciones de trading con Títulos."
+        "Comisiones Netas son todas las comisiones cobradas menos las pagadas por operaciones de negocio."
+        "Previsiones & Otros son egresos del periodo para constituir previsiones por posibles perdidas de crédito futuras."
+        "Gastos = refleja la perdida del mes por pago de gastos Directos y gastos Indirectos" 
+        "Gastos = Gastos Totales"
+        "Directos = subtotal de gastos directos"
+        "Indirectos = subtotal de gastos indirectos"
+        "Estos gastos son directos e indirecto al negocio que este mostrando."
     ),
+    "P&L Empresas": (
+        "En esta hoja, el concepto de Préstamos y Avales promedio consolida el volumen de préstamos promedio del mes pesificados ya que contiene el volumen de pesos, dólares y prestamos de titulos si corresponde. "
+        "Los volúmenes de dólares están expresados en pesos al tipo de cambio promedio del mes."
+        "Volúmenes hace referencia a volúmenes de prestamos o de depósitos."
+        "En el concepto de Volúmenes cuando se muestra YTD es el volumen promedio del periodo."
+        "TP representa Titulos públicos."
+    )
     
     # Agregar futuros contextos aquí siguiendo el mismo patrón:
     # "Evolución MF": "Esta gráfica muestra la evolución temporal del margen financiero...",

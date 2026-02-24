@@ -80,7 +80,6 @@ variables:
   
   enrich_model:
     description: "Nombre del endpoint LLM para analizar gráficos en las páginas"
-    # default: "databricks-gemma-3-12b"
     default: "databricks-llama-4-maverick"
 
   # Variables para enriquecimiento con topic heurístico
@@ -90,7 +89,6 @@ variables:
   
   topic_model:
     description: "Nombre del endpoint LLM para generar el campo topic_llm de cada página"
-    # default: "databricks-gemma-3-12b"
     default: "databricks-llama-4-maverick"
   
   topic_min_chars:
@@ -104,7 +102,6 @@ variables:
   
   topic_content_model:
     description: "Nombre del endpoint LLM para generar topic_content de cada página"
-    # default: "databricks-gemma-3-12b"
     default: "databricks-llama-4-maverick"
   
   topic_content_min_chars:
@@ -118,7 +115,7 @@ variables:
   
   metadata_model:
     description: "Nombre del endpoint LLM para extraer y enriquecer metadata del documento"
-    default: "databricks-gemma-3-12b"
+    default: "databricks-llama-4-maverick"
   
   metadata_min_chars:
     description: "Mínimo de caracteres de page_text requeridos para enriquecer metadata"
@@ -266,9 +263,18 @@ targets:
   dev:
     default: true
     workspace:
+      host: https://dbc-56f60291-144c.cloud.databricks.com/
+    variables:
+      catalog: bind_agent
+      schema: docs
+      landing_volume: pdf
+      state_volume: docs_state
+
+  dev-bind:
+    default: true
+    workspace:
       host: https://bind-dev.cloud.databricks.com
     variables:
-      # catalog: bind_agent
       catalog: demo
       schema: docs
       landing_volume: pdf
