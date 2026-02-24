@@ -5,6 +5,7 @@ Bronze Excel Ingest - Ingesta de archivos Excel (.xlsx)
 Lee archivos Excel desde un Volume, extrae la hoja "BASE" y guarda
 cada fila como un registro en la tabla Bronze.
 
+Solo procesa archivos cuyo nombre contiene una fecha YYYYMMDD antes de .xlsx.
 Patrón similar a bronze_pdf_ingest.py pero adaptado para datos tabulares.
 """
 import argparse
@@ -267,6 +268,7 @@ def main():
     ensure_bronze_table(args.bronze_table)
 
     # Auto Loader para detectar archivos Excel nuevos
+    # Solo procesa archivos cuyo nombre contiene fecha YYYYMMDD
     df = (
         spark.readStream.format("cloudFiles")
         .option("cloudFiles.format", "binaryFile")
@@ -275,6 +277,12 @@ def main():
         .option("pathGlobFilter", "*.xlsx")
         .load(args.input_path)
         .withColumn("doc_id", F.sha2(F.col("path"), 256))
+        # --- FILTRO: solo archivos con fecha YYYYMMDD en el nombre ---
+        .withColumn("_filename", F.element_at(F.split(F.col("path"), "/"), -1))
+        .filter(
+            F.regexp_extract(F.col("_filename"), r"(\d{8})\.xlsx$", 1) != ""
+        )
+        .drop("_filename")
     )
 
     # Procesar cada batch de archivos

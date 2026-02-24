@@ -25,35 +25,51 @@ def main():
 
     bronze_df = spark.table(args.bronze_table)
 
-    # 1) Identificar archivo y source_type
-    # path puede venir como /Volumes/... o dbfs:/Volumes/... -> split por "/"
+    # 1) Extraer filename y determinar source_type con CONTAINS (no match exacto)
     df = (
         bronze_df
         .withColumn("filename", F.element_at(F.split(F.col("path"), "/"), -1))
         .withColumn(
             "source_type",
-            F.when(F.col("filename") == F.lit("Matriz_EMP.xlsx"), F.lit("Empresas"))
-             .when(F.col("filename") == F.lit("Matriz_CORPO_INST.xlsx"), F.lit("Corporate & Institucional"))
+            F.when(F.col("filename").like("Matriz_EMP_%"), F.lit("Empresas"))
+             .when(F.col("filename").like("Matriz_CORPO_INST_%"), F.lit("Corporate & Institucional"))
              .otherwise(F.lit(None))
         )
         .filter(F.col("source_type").isNotNull())
     )
 
-    # 2) Quedarse con el último archivo ingresado por cada caso (por ingest_ts)
-    w = Window.partitionBy("source_type")
+    # 2) Extraer la fecha YYYYMMDD del nombre del archivo y derivar el año
+    #    Solo conservar archivos que tengan fecha válida en el nombre
     df = (
-        df.withColumn("latest_mod_time", F.max("modificationTime").over(w))
-            .filter(F.col("modificationTime") == F.col("latest_mod_time"))
-            .drop("latest_mod_time")
+        df
+        .withColumn(
+            "file_date_str",
+            F.regexp_extract(F.col("filename"), r"(\d{8})\.xlsx$", 1)
+        )
+        .filter(F.col("file_date_str") != "")  # descartar archivos sin fecha
+        .withColumn(
+            "file_date",
+            F.to_date(F.col("file_date_str"), "yyyyMMdd")
+        )
+        .filter(F.col("file_date").isNotNull())  # descartar fechas inválidas
+        .withColumn("file_year", F.year(F.col("file_date")))
     )
 
-    # 3) Redondear DOUBLE -> entero (BIGINT)
+    # 3) Por cada (source_type, file_year), quedarse con el archivo más reciente
+    #    Usamos file_date (del nombre) como criterio de recencia, no modificationTime
+    w = Window.partitionBy("source_type", "file_year")
+    df = (
+        df
+        .withColumn("latest_file_date", F.max("file_date").over(w))
+        .filter(F.col("file_date") == F.col("latest_file_date"))
+        .drop("latest_file_date")
+    )
+
+    # 4) Redondear DOUBLE -> entero (BIGINT)
     for c in DOUBLE_COLS:
         df = df.withColumn(c, F.round(F.col(c), 0).cast("bigint"))
 
-    # 4) Selección final con nombres en minúsculas + renombres Ano/Mes/Fecha
-    #    Aplicamos normalize_str() a todos los campos string:
-    #    trim + lower + regexp_replace para espacios múltiples
+    # 5) Selección final con nombres en minúsculas + normalización de strings
     def normalize_str(col_name):
         """trim + lower + colapsar espacios múltiples a uno solo"""
         return F.regexp_replace(F.lower(F.trim(F.col(col_name))), r'\s+', ' ')
@@ -68,6 +84,10 @@ def main():
         F.col("ingest_ts").alias("ingest_ts"),
 
         normalize_str("source_type").alias("source_type"),
+
+        # Metadata extraída del filename
+        F.col("file_date").alias("file_date"),
+        F.col("file_year").alias("file_year"),
 
         F.col("Ano").cast("int").alias("year"),
         F.col("Mes").cast("int").alias("month"),
@@ -94,11 +114,10 @@ def main():
         normalize_str("Banca").alias("banca"),
     )
 
-    # Dedupe útil por si reingestaste con otro checkpoint:
-    # row_index se reinicia por archivo, por eso incluyo source_type
-    silver_df = silver_df.dropDuplicates(["source_type", "sheet_name", "row_index"])
+    # Dedupe por source_type + sheet_name + row_index + file_date
+    silver_df = silver_df.dropDuplicates(["source_type", "sheet_name", "row_index", "file_date"])
 
-    # 5) Overwrite completo de la tabla Silver
+    # 6) Overwrite completo de la tabla Silver
     (
         silver_df.write
         .mode("overwrite")
