@@ -1,6 +1,6 @@
 # resources/bind_agent_etl_excel.jobs.yml
 # Pipeline ETL para archivos Excel - Matriz Empresas
-# Patrón idéntico a bind_agents_etl_jobs.yml (PDF)
+# Compute: Job Cluster (single-node, cost-optimized)
 
 resources:
   jobs:
@@ -18,25 +18,41 @@ resources:
           min_time_between_triggers_seconds: 60
           wait_after_last_change_seconds: 120
 
-      # Serverless compute (reutilizable por todas las tasks)
-      environments:
-        - environment_key: etl_excel_serverless
-          spec:
-            environment_version: "2"
-            dependencies:
-              - "pandas"
-              - "openpyxl"
+      # Job Cluster (reutilizable por todas las tasks)
+      job_clusters:
+        - job_cluster_key: etl_excel_cluster
+          new_cluster:
+            spark_version: ${var.spark_version}
+            node_type_id: ${var.node_type_id}
+            num_workers: 0
+            data_security_mode: SINGLE_USER
+            aws_attributes:
+              ebs_volume_count: 1
+              ebs_volume_size: 100
+              ebs_volume_type: GENERAL_PURPOSE_SSD
+            spark_conf:
+              spark.master: "local[*, 4]"
+              spark.databricks.cluster.profile: singleNode
+            custom_tags:
+              ResourceClass: SingleNode
+              project: bind_agents
 
       max_concurrent_runs: 1
 
       tasks:
         # -----------------------
-        # TASK 1: Bronze Excel (SERVERLESS)
+        # TASK 1: Bronze Excel
         # -----------------------
         - task_key: bronze_excel_ingest
           max_retries: 2
           min_retry_interval_millis: 120000
           timeout_seconds: 1800
+          job_cluster_key: etl_excel_cluster
+          libraries:
+            - pypi:
+                package: pandas
+            - pypi:
+                package: openpyxl
           spark_python_task:
             python_file: ../../src/bronze_excel_ingest.py
             parameters:
@@ -50,16 +66,20 @@ resources:
               - ${var.bronze_excel_table}
               - --sheet_name
               - ${var.excel_sheet_name}
-          environment_key: etl_excel_serverless
-        
 
         # -----------------------
-        # TASK 2: Silver Excel (SERVERLESS)
+        # TASK 2: Silver Excel
         # -----------------------
         - task_key: silver_excel_transform
           depends_on:
             - task_key: bronze_excel_ingest
           timeout_seconds: 3600
+          job_cluster_key: etl_excel_cluster
+          libraries:
+            - pypi:
+                package: pandas
+            - pypi:
+                package: openpyxl
           spark_python_task:
             python_file: ../../src/silver_excel_transform.py
             parameters:
@@ -67,4 +87,3 @@ resources:
               - ${var.bronze_excel_table}
               - --silver_table
               - ${var.silver_excel_table}
-          environment_key: etl_excel_serverless

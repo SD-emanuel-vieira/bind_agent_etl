@@ -12,7 +12,7 @@ variables:
   catalog:
     description: "Catálogo de Unity Catalog donde se crean todas las tablas"
     # default: bind_agent
-    default: demo
+    default: dev_sandbox
   
   schema:
     description: "Schema dentro del catálogo para organizar las tablas de documentos"
@@ -228,6 +228,19 @@ variables:
     default: "${var.catalog}.${var.schema}.silver_excel"
 
 # ==============================================================================
+# COMPUTE
+# ==============================================================================
+
+# Compute para Job Clusters
+  spark_version:
+    description: "Databricks Runtime version para los job clusters"
+    default: "16.2.x-scala2.12"
+
+  node_type_id:
+    description: "Tipo de instancia para los job clusters (single-node)"
+    default: "m5.large"
+
+# ==============================================================================
 # RECURSOS COMPARTIDOS
 # ==============================================================================
 resources:
@@ -269,13 +282,17 @@ targets:
       schema: docs
       landing_volume: pdf
       state_volume: docs_state
+      spark_version: "16.2.x-scala2.12"
+      node_type_id: "m5.large"
 
   dev-bind:
     default: true
     workspace:
       host: https://bind-dev.cloud.databricks.com
     variables:
-      catalog: demo
+      catalog: dev_sandbox
       schema: docs
       landing_volume: pdf
       state_volume: docs_state
+      spark_version: "16.2.x-scala2.12"
+      node_type_id: "m5.large"

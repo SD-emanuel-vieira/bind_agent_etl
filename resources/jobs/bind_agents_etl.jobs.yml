@@ -1,3 +1,7 @@
+# resources/bind_agents_etl.jobs.yml
+# Pipeline ETL para PDFs - Bronze → Silver → Gold → Embeddings → VS
+# Compute: Serverless
+
 resources:
   jobs:
     pdf_bronze_ingest:
@@ -32,6 +36,7 @@ resources:
           max_retries: 2
           min_retry_interval_millis: 120000
           timeout_seconds: 1800
+          environment_key: etl_serverless
           spark_python_task:
             python_file: ../../src/bronze_pdf_ingest.py
             parameters:
@@ -43,15 +48,15 @@ resources:
               - ${var.schema_location}
               - --bronze_table
               - ${var.bronze_table}
-          environment_key: etl_serverless
 
         # -----------------------
-        # TASK 2: Silver (SERVERLESS)
+        # TASK 2: Silver OCR (SERVERLESS)
         # -----------------------
         - task_key: silver_pdf_ocr
           depends_on:
             - task_key: bronze_pdf_ingest
           timeout_seconds: 3600
+          environment_key: etl_serverless
           spark_python_task:
             python_file: ../../src/silver_pdf_ocr.py
             parameters:
@@ -60,17 +65,16 @@ resources:
               - --silver_table
               - ${var.silver_table}
               - --image_output_path
-              - ${var.image_output_path}   
-          environment_key: etl_serverless
+              - ${var.image_output_path}
 
         # -----------------------
-        # TASK 2b: Silver Enrich (topic_llm + graphs)
-        # Lee imágenes ya escritas y hace enrichment
+        # TASK 2b: Silver Enrich (SERVERLESS)
         # -----------------------
         - task_key: silver_pdf_enrich
           depends_on:
             - task_key: silver_pdf_ocr
           timeout_seconds: 3600
+          environment_key: etl_serverless
           spark_python_task:
             python_file: ../../src/silver_pdf_enrich.py
             parameters:
@@ -104,15 +108,15 @@ resources:
               - ${var.metadata_model}
               - --metadata_min_chars
               - ${var.metadata_min_chars}
-          environment_key: etl_serverless
 
         # -----------------------
-        # TASK 3: Gold (SERVERLESS)
+        # TASK 3: Gold Chunks (SERVERLESS)
         # -----------------------
         - task_key: gold_pdf_chunks
           depends_on:
             - task_key: silver_pdf_enrich
           timeout_seconds: 3600
+          environment_key: etl_serverless
           spark_python_task:
             python_file: ../../src/gold_pdf_chunks.py
             parameters:
@@ -126,13 +130,14 @@ resources:
               - ${var.chunk_overlap_chars}
               - --min_chunk_chars
               - ${var.min_chunk_chars}
-          environment_key: etl_serverless
+
         # -----------------------
-        # TASK 4: Embeddings chuncks
+        # TASK 4: Embeddings (SERVERLESS)
         # -----------------------
         - task_key: embeddings
           depends_on:
             - task_key: gold_pdf_chunks
+          environment_key: etl_serverless
           spark_python_task:
             python_file: ../../src/embeddings_pdf_chunks.py
             parameters:
@@ -146,14 +151,15 @@ resources:
               - driver
               - --batch_size
               - "96"
-          environment_key: etl_serverless
+
         # -----------------------
-        # TASK 5: Vector Search (endpoint + index)
+        # TASK 5: Vector Search (SERVERLESS)
         # -----------------------
         - task_key: vector_search_index
           depends_on:
             - task_key: embeddings
           timeout_seconds: 2400
+          environment_key: etl_serverless
           spark_python_task:
             python_file: ../../src/vector_search_index.py
             parameters:
@@ -177,6 +183,3 @@ resources:
               - ${var.vs_index_timeout_seconds}
               - --ensure_cdf
               - --trigger_sync
-          environment_key: etl_serverless
-
-
