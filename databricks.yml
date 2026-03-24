@@ -73,6 +73,14 @@ variables:
     description: "Path donde se guardan las imágenes extraídas de cada página del PDF para análisis"
     default: /Volumes/${var.catalog}/${var.schema}/docs_state/ai_parse_images/pdf_bronze/
 
+  gemini_endpoint:
+    description: "Nombre del serving endpoint de Gemini para verificación de tablas"
+    default: "databricks-gemini-2-5-pro"
+
+  verify_tables:
+    description: "Activar verificación de tablas con Gemini (double-pass para precisión numérica)"
+    default: "true"
+
   # Variables para enriquecimiento con gráficos
   do_enrich_graphs:
     description: "Flag para activar/desactivar el análisis de gráficos con LLM en páginas del PDF"

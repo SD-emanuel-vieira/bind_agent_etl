@@ -27,6 +27,10 @@ def parse_args():
     p.add_argument("--bronze_table", required=True)
     p.add_argument("--silver_table", required=True)
     p.add_argument("--image_output_path", required=False, default="")
+    p.add_argument("--verify_tables", required=False, type=str2bool, default=True,
+                    help="Verificar tablas con Gemini via ai_query (default: True)")
+    p.add_argument("--gemini_endpoint", required=False, default="databricks-gemini-2.5-pro",
+                    help="Endpoint de Gemini para verificación de tablas")
     return p.parse_args()
 
 
@@ -144,6 +148,37 @@ def build_parse_expr(image_output_path: str) -> str:
     return f"ai_parse_document(content, map({','.join(kvs)}))"
 
 
+# ---------------------------------------------------------------------------
+# Verificación de tablas con Gemini (double-pass)
+# ---------------------------------------------------------------------------
+VERIFY_PROMPT = (
+    "You are a numerical accuracy auditor. "
+    "Compare the extracted table text below against what you see in the image. "
+    "Check EVERY number digit-by-digit. Look for: transposed digits (e.g. 3278 vs 3728), "
+    "missing digits, extra digits, wrong decimal separators. "
+    "If you find ANY discrepancy, return the CORRECTED full table text. "
+    "If everything is correct, return the table text UNCHANGED. "
+    "Return ONLY the table text, nothing else. No explanation, no markdown fences. "
+    "Extracted table text: "
+)
+
+
+def build_verify_expr(gemini_endpoint: str) -> str:
+    """
+    Expresión SQL que envía la imagen de la página + el texto de tabla extraído
+    a Gemini para verificación numérica.
+    Requiere columnas: page_image_bytes (BINARY), page_table_text (STRING)
+    """
+    prompt_escaped = VERIFY_PROMPT.replace("'", "\\'")
+    return f"""
+        ai_query(
+            '{gemini_endpoint}',
+            CONCAT('{prompt_escaped}', page_table_text),
+            files => page_image_bytes
+        )
+    """
+
+
 def add_file_metadata(df):
     filename = F.regexp_extract(F.col("path"), r"([^/]+)$", 1)
     file_type = F.regexp_extract(filename, r"^([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+)", 1)
@@ -234,6 +269,8 @@ def main():
     print(f"[silver_pdf_ocr] bronze_table      = {args.bronze_table}")
     print(f"[silver_pdf_ocr] silver_table      = {args.silver_table}")
     print(f"[silver_pdf_ocr] image_output_path = {args.image_output_path}")
+    print(f"[silver_pdf_ocr] verify_tables     = {args.verify_tables}")
+    print(f"[silver_pdf_ocr] gemini_endpoint   = {args.gemini_endpoint}")
 
     ensure_silver_table(args.silver_table)
 
@@ -405,6 +442,71 @@ def main():
     
     # Agregar page_segment (segmento de negocio detectado)
     updates = add_page_segment(updates)
+
+    # ------------------------------------------------------------------
+    # 4b) Verificación de tablas con Gemini (double-pass)
+    #     Solo para páginas que tienen tablas Y una imagen disponible.
+    #     Lee la imagen desde el Volume, la envía con el texto de tabla
+    #     extraído a Gemini, y reemplaza page_table_text si Gemini
+    #     devuelve una corrección válida.
+    # ------------------------------------------------------------------
+    if args.verify_tables and args.image_output_path:
+        from pyspark.sql.functions import udf, col, lit
+        from pyspark.sql.types import BinaryType
+
+        # UDF: lee la imagen desde el path en el Volume
+        @udf(BinaryType())
+        def read_image_bytes(image_uri):
+            if not image_uri:
+                return None
+            try:
+                with open(image_uri, "rb") as f:
+                    return f.read()
+            except Exception:
+                return None
+
+        # Separar páginas con tablas vs sin tablas
+        with_tables = updates.where("page_table_count > 0 AND page_image_uri IS NOT NULL")
+        without_tables = updates.where("page_table_count = 0 OR page_image_uri IS NULL")
+
+        table_page_count = with_tables.count()
+        print(f"[silver_pdf_ocr] Páginas con tablas a verificar: {table_page_count}")
+
+        if table_page_count > 0:
+            verify_expr = build_verify_expr(args.gemini_endpoint)
+
+            # Flujo lineal: leer imagen → verificar → fallback a original si falla
+            verified = (
+                with_tables
+                .withColumn("page_image_bytes", read_image_bytes(col("page_image_uri")))
+                # Solo llamar a Gemini si pudimos leer la imagen
+                .withColumn("verified_table_text",
+                    F.when(
+                        F.col("page_image_bytes").isNotNull(),
+                        expr(verify_expr)
+                    ).otherwise(F.lit(None).cast("string"))
+                )
+                # Usar versión verificada si es válida, sino mantener original
+                .withColumn("page_table_text",
+                    F.when(
+                        F.col("verified_table_text").isNotNull()
+                        & (F.length(F.trim(F.col("verified_table_text"))) > 0)
+                        & (~F.col("verified_table_text").contains("error")),
+                        F.col("verified_table_text")
+                    ).otherwise(F.col("page_table_text"))
+                )
+                .drop("verified_table_text", "page_image_bytes")
+            )
+
+            updates = verified.unionByName(without_tables)
+            print(f"[silver_pdf_ocr] Verificación de tablas completa.")
+        else:
+            print("[silver_pdf_ocr] No hay páginas con tablas para verificar.")
+    else:
+        if not args.verify_tables:
+            print("[silver_pdf_ocr] Verificación de tablas desactivada (--verify_tables false).")
+        elif not args.image_output_path:
+            print("[silver_pdf_ocr] Verificación de tablas requiere --image_output_path para leer imágenes.")
 
     # Agregar columnas de enrichment como NULL
     updates = (

@@ -51,6 +51,7 @@ resources:
 
         # -----------------------
         # TASK 2: Silver OCR (SERVERLESS)
+        # ai_parse_document + verificación de tablas con Gemini
         # -----------------------
         - task_key: silver_pdf_ocr
           depends_on:
@@ -66,6 +67,10 @@ resources:
               - ${var.silver_table}
               - --image_output_path
               - ${var.image_output_path}
+              - --verify_tables
+              - ${var.verify_tables}
+              - --gemini_endpoint
+              - ${var.gemini_endpoint}
 
         # -----------------------
         # TASK 2b: Silver Enrich (SERVERLESS)
