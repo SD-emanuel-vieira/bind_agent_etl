@@ -799,6 +799,53 @@ def main():
 
     print("[gold_pdf_chunks] Upsert + cleanup completo.")
 
+    # 4) Deduplicación de tópicos acumulativos: conservar solo el mes más reciente
+    #    por file_type + año.
+    #    Los archivos son acumulativos dentro del año (ej: octubre incluye ene-oct),
+    #    por lo que los meses anteriores son redundantes.
+    #    Un chunk es acumulativo si CUALQUIERA de topic_content, topic_heuristic o
+    #    topic_llm empieza con 'P&L', o contiene 'Volumen' o 'Gasto'.
+    spark.sql(f"""
+    DELETE FROM {args.gold_table} AS t
+    WHERE (   t.topic_content   LIKE 'P&L%%'
+           OR t.topic_heuristic LIKE 'P&L%%'
+           OR t.topic_llm       LIKE 'P&L%%'
+           OR t.topic_content   LIKE '%%Volumen%%'
+           OR t.topic_heuristic LIKE '%%Volumen%%'
+           OR t.topic_llm       LIKE '%%Volumen%%'
+           OR t.topic_content   LIKE '%%Gasto%%'
+           OR t.topic_heuristic LIKE '%%Gasto%%'
+           OR t.topic_llm       LIKE '%%Gasto%%')
+      AND t.file_type IS NOT NULL
+      AND t.file_date IS NOT NULL
+      AND EXISTS (
+        SELECT 1
+        FROM (
+          SELECT file_type,
+                 YEAR(file_date) AS file_year,
+                 MAX(file_date)  AS max_file_date
+          FROM {args.gold_table}
+          WHERE (   topic_content   LIKE 'P&L%%'
+                 OR topic_heuristic LIKE 'P&L%%'
+                 OR topic_llm       LIKE 'P&L%%'
+                 OR topic_content   LIKE '%%Volumen%%'
+                 OR topic_heuristic LIKE '%%Volumen%%'
+                 OR topic_llm       LIKE '%%Volumen%%'
+                 OR topic_content   LIKE '%%Gasto%%'
+                 OR topic_heuristic LIKE '%%Gasto%%'
+                 OR topic_llm       LIKE '%%Gasto%%')
+            AND file_type IS NOT NULL
+            AND file_date IS NOT NULL
+          GROUP BY file_type, YEAR(file_date)
+        ) latest
+        WHERE t.file_type = latest.file_type
+          AND YEAR(t.file_date) = latest.file_year
+          AND t.file_date < latest.max_file_date
+      )
+    """)
+
+    print("[gold_pdf_chunks] Deduplicación de tópicos acumulativos (P&L, Volumen, Gasto) completa.")
+
 
 if __name__ == "__main__":
     main()
