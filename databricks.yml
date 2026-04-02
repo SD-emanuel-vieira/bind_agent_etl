@@ -304,3 +304,17 @@ targets:
       state_volume: docs_state
       spark_version: "16.2.x-scala2.12"
       node_type_id: "m5.large"
+
+  dev-bind-sp:
+    workspace:
+      host: https://bind-dev.cloud.databricks.com
+      root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}
+    run_as:
+      service_principal_name: fc6dbed2-a0e1-4157-bd87-3366b6334831
+    variables:
+      catalog: dev_sandbox
+      schema: docs
+      landing_volume: pdf
+      state_volume: docs_state
+      spark_version: "16.2.x-scala2.12"
+      node_type_id: "m5.large"
